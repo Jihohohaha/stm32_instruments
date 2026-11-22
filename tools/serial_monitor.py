@@ -32,6 +32,8 @@ def find_port():
         sys.exit(1)
     if len(c) > 1:
         print("포트가 여러 개입니다. 첫 번째를 엽니다:", c, "(다르면 인자로 주세요)")
+    else:
+        print("포트:", c[0])
     return c[0]
 
 
@@ -46,7 +48,15 @@ def main(argv):
     os.makedirs("logs", exist_ok=True)
     path = os.path.join("logs", datetime.datetime.now().strftime("%m%d_%H%M%S") + ".txt")
     modes, last_shown = {}, None
-    with serial.Serial(port, 115200, timeout=0.2) as ser, open(path, "w", encoding="utf-8") as log:
+    try:
+        ser = serial.Serial(port, 115200, timeout=0.2)
+    except serial.SerialException as e:
+        now = sorted(glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*"))
+        print(f"[포트 열기 실패] {port}: {e.strerror or e}")
+        print("지금 보이는 포트:", now if now else "없음 (USB 케이블·보드 전원 확인, 데이터 케이블인지 확인)")
+        print("다른 프로그램(screen, 아두이노 시리얼 모니터, 게임 탭)이 잡고 있어도 안 열립니다.")
+        sys.exit(1)
+    with ser, open(path, "w", encoding="utf-8") as log:
         print(f"[열림] {port}  → 저장: {path}  (Ctrl+C로 끝)")
         time.sleep(2.0)                      # Uno는 포트를 열면 리셋된다
         if send:
