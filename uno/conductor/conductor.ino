@@ -98,9 +98,10 @@ ISR(PCINT1_vect)
   if (ch & _BV(5)) sclEdges++;
   if (ch & _BV(4)) sdaEdges++;
 }
+const bool EDGE_DIAG = false;   // true: 선 변화 횟수 진단(sclEdge/sdaEdge). 엣지마다 인터럽트가 걸려 Uno가 바빠지므로 평소엔 끔
 void edgeWatch(bool on)
 {
-  if (on) { pcLast = PINC; PCMSK1 |= _BV(PCINT12) | _BV(PCINT13); PCICR |= _BV(PCIE1); }
+  if (on && EDGE_DIAG) { pcLast = PINC; PCMSK1 |= _BV(PCINT12) | _BV(PCINT13); PCICR |= _BV(PCIE1); }
   else    { PCMSK1 &= ~(_BV(PCINT12) | _BV(PCINT13)); }
 }
 

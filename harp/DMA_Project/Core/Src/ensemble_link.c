@@ -340,8 +340,11 @@ static void i2c_init(void)
     i2c_hw_reset();
 }
 
-static uint8_t i2c_wait(volatile uint32_t *reg, uint32_t mask, uint32_t t0, uint32_t limit)
+/* 한 단계(START·주소·바이트 하나)를 기다린다. 시간은 단계마다 새로 잰다
+ * (한 줄 전체를 합쳐 재면 28글자 줄은 100kHz에서 2.6ms + Uno의 바이트별 대기로 제한을 넘는다) */
+static uint8_t i2c_wait(volatile uint32_t *reg, uint32_t mask, uint32_t limit)
 {
+    const uint32_t t0 = DWT->CYCCNT;
     while (!(*reg & mask)) {
         if (I2C1->SR1 & (I2C_SR1_ARLO | I2C_SR1_BERR | I2C_SR1_AF)) return 0;
         if ((DWT->CYCCNT - t0) > limit) return 0;
@@ -356,19 +359,27 @@ static int i2c_write_once(const char *s, int n)
     if ((I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) || !(I2C1->CR1 & I2C_CR1_PE)) {
         i2c_reinit++; i2c_hw_reset();                   /* 지난번 START/STOP 명령이 남아 있으면 깨끗하게 */
     }
-    while (I2C1->SR2 & I2C_SR2_BUSY) {                  /* 다른 보드가 보내는 중 */
-        if ((DWT->CYCCNT - t0) > limit) { i2c_to_busy++; goto fail; }
+    {
+        /* BUSY인데 두 선이 계속 HIGH면 아무도 안 쓰는 것 = F103이 BUSY를 잘못 남긴 것 → 기다리지 않고 바로 초기화.
+         * 선이 한 번이라도 LOW가 되면 진짜 다른 보드가 보내는 중이므로 그 줄(약 3ms)이 끝날 때까지 기다린다 */
+        const uint32_t idle_need = SystemCoreClock / 1000000u * 50u;      /* 50us = 100kHz 클럭 5번 */
+        uint32_t idle_t0 = DWT->CYCCNT;
+        while (I2C1->SR2 & I2C_SR2_BUSY) {
+            if ((GPIOB->IDR & ((1u << 8) | (1u << 9))) != ((1u << 8) | (1u << 9))) idle_t0 = DWT->CYCCNT;
+            else if ((DWT->CYCCNT - idle_t0) > idle_need) { i2c_reinit++; i2c_hw_reset(); break; }
+            if ((DWT->CYCCNT - t0) > 4u * limit) { i2c_to_busy++; goto fail; }
+        }
     }
     I2C1->CR1 |= I2C_CR1_START;
-    if (!i2c_wait(&I2C1->SR1, I2C_SR1_SB, t0, limit)) goto fail;
+    if (!i2c_wait(&I2C1->SR1, I2C_SR1_SB, limit)) goto fail;
     I2C1->DR = (uint8_t)(LINK_I2C_ADDR << 1);           /* 쓰기 */
-    if (!i2c_wait(&I2C1->SR1, I2C_SR1_ADDR, t0, limit)) goto fail;
+    if (!i2c_wait(&I2C1->SR1, I2C_SR1_ADDR, limit)) goto fail;
     (void)I2C1->SR2;                                    /* SR1 → SR2 읽기로 ADDR 지움 */
     for (int i = 0; i < n; i++) {
-        if (!i2c_wait(&I2C1->SR1, I2C_SR1_TXE, t0, limit)) goto fail;
+        if (!i2c_wait(&I2C1->SR1, I2C_SR1_TXE, limit)) goto fail;
         I2C1->DR = (uint8_t)s[i];
     }
-    if (!i2c_wait(&I2C1->SR1, I2C_SR1_BTF, t0, limit)) goto fail;
+    if (!i2c_wait(&I2C1->SR1, I2C_SR1_BTF, limit)) goto fail;
     I2C1->CR1 |= I2C_CR1_STOP;
     i2c_ok++;
     return 0;

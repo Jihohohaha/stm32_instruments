@@ -86,7 +86,7 @@
 #define LINK_I2C_ADDR        0x08   /* Uno Wire.begin(0x08) */
 #endif
 #ifndef LINK_I2C_TIMEOUT_MS
-#define LINK_I2C_TIMEOUT_MS  3      /* 한 번 보내기 최대 대기. Uno가 없으면 이만큼 기다리고 포기 */
+#define LINK_I2C_TIMEOUT_MS  2      /* 한 단계(START·주소·바이트 하나) 최대 대기. Uno가 없으면 이만큼 기다리고 포기 */
 #endif
 
 #ifndef LINK_DEFAULT_BEAT_MS
