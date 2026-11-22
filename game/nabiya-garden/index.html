@@ -8,6 +8,7 @@
   v1.0.3 — 픽셀 그림(나비·꽃·이슬·씨앗)을 '한 점 = 1px'로 줄여 두고 부드럽게 확대 없이 그림, 나비 크기 1.25→1.55배(CONFIG.butterflyScale) (요청목록 1·4번)
   v1.0.4 — 꽃에 행별 색을 입힐 때 밝은 꽃잎에만 입힘, 노란 꽃술과 남색 외곽선은 그대로 (요청목록 5번)
   v1.0.5 — 노란 나비 한 장에서 날개 색만 바꿔 5색(도 산호빨강·레 주황·미 노랑·파 청록·솔 파랑), 남색 외곽선은 그대로 (요청목록 3번)
+  v1.1.0 — 드럼 쿵·짝 순서를 마디마다 바꿈(63음 그대로), 하프는 마디 첫 박 한 음(32→16음, 도·솔), 판정 창 넓힘, 우측 상단 '센서 읽기 부담' 패널(#S 줄: CPU·놓친 샘플, H 키로 숨김), 결과 화면 비교를 CPU·놓친 샘플 기준으로
 -->
 <html lang="ko">
 <head>
@@ -64,9 +65,11 @@
    CONFIG — 실제 하드웨어로 해 본 뒤 바꿀 숫자는 여기만 고치면 된다
    ========================================================================== */
 const CONFIG = {
-  version: 'v1.0.5',
+  version: 'v1.1.0',
   // 판정 창(ms). 키보드 모드 판정과, 시리얼 줄에 등급 칸이 없을 때의 분류에 쓴다. 템포와 무관하게 ms 고정.
-  judgeMs: { default: { P: 50, G: 120, B: 250 }, W: { P: 100, G: 200, B: 400 } },
+  judgeMs: { default: { P: 80, G: 160, B: 300 }, W: { P: 130, G: 250, B: 400 } },   // v1.1.0 넓힘 (이전 50/120/250, 100/200/400)
+  // v1.1.0 우측 상단 패널: 보드가 1초마다 보내는 #S 줄(센서 읽기에 쓴 CPU %, 폴링이 놓친 샘플 수)
+  hwPanel: { x: 984, y: 108, w: 440, cpuFull: 30, sampleMs: 0.125, staleMs: 3500 },   // cpuFull: 막대가 꽉 차는 CPU %, sampleMs: 샘플 한 칸(8kHz)
   score: { P: 100, G: 70, B: 30, M: 0 },          // 음 틀림은 Bad 점수
   ranks: [['만개', 90], ['개화', 75], ['새싹', 50], ['씨앗', 0]],   // 정확도 % 이상
   tempos: [70, 80, 90, 100, 110],
@@ -100,9 +103,13 @@ const BARS = [
   ['레1 레1 레1 레1', 'G7'], ['레1 미1 파2', 'G7'], ['미1 미1 미1 미1', 'C'], ['미1 파1 솔2', 'C'],
   ['솔1 미1 미2', 'C'], ['파1 레1 레2', 'G7'], ['도1 미1 솔1 솔1', 'C'], ['미1 미1 미2', 'C'],
 ];
-const DRUM_BAR = '쿵1 짝1 쿵1 짝1';
-const DRUM_LAST_BAR = '쿵1 짝1 쿵2';
-const CHORDS = { C: ['도', '미'], G7: ['솔', '레'] };       // 하프: 1박, 3박
+// v1.1.0 드럼: 매 박 그대로 치되 쿵·짝 순서를 마디마다 바꾼다 (노트 수 63 그대로, 반 박은 보드가 박 번호로 보내서 넣지 않음)
+const DRUM_ODD_BAR = '쿵1 쿵1 짝1 쿵1';      // 1·3·5…15마디
+const DRUM_BAR = '쿵1 짝1 쿵1 짝1';          // 2·4·6…14마디
+const DRUM_FILL_BAR = '짝1 짝1 짝1 쿵1';     // 8마디
+const DRUM_LAST_BAR = '짝1 짝1 쿵2';         // 16마디
+const drumBar = (bi) => bi === BARS.length - 1 ? DRUM_LAST_BAR : bi === 7 ? DRUM_FILL_BAR : bi % 2 === 0 ? DRUM_ODD_BAR : DRUM_BAR;
+const CHORDS = { C: ['도'], G7: ['솔'] };                 // v1.1.0 하프: 마디 첫 박에 한 음(4박). 이전: 1박·3박에 도·미 / 솔·레
 const K2E = { 도: 'DO', 레: 'RE', 미: 'MI', 파: 'FA', 솔: 'SOL', 쿵: 'KICK', 짝: 'SNARE' };
 const KO = { DO: '도', RE: '레', MI: '미', FA: '파', SOL: '솔', KICK: '쿵', SNARE: '짝' };
 const INSTS = ['W', 'H', 'D'];
@@ -121,9 +128,9 @@ function buildChart() {
     let sum = 0;
     melody.split(' ').forEach(tok => { const len = Number(tok.slice(1)); add('W', b0 + sum, len, K2E[tok[0]]); sum += len; });
     if (sum !== 4) problems.push((bi + 1) + '마디 관악기 박 합 ' + sum);
-    CHORDS[chord].forEach((p, i) => add('H', b0 + i * 2, 2, K2E[p]));
+    CHORDS[chord].forEach((p, i) => add('H', b0 + i * 4, 4, K2E[p]));
     let ds = 0;
-    (bi === BARS.length - 1 ? DRUM_LAST_BAR : DRUM_BAR).split(' ').forEach(tok => {
+    drumBar(bi).split(' ').forEach(tok => {
       const len = Number(tok.slice(1)); add('D', b0 + ds, len, K2E[tok[0]]); ds += len;
     });
     if (ds !== 4) problems.push((bi + 1) + '마디 드럼 박 합 ' + ds);
@@ -158,6 +165,7 @@ const G = {
   status: '', statusAt: 0,
   hits: [], hover: null,
   sim: false, simNow: 0,
+  hw: { W: newHw(), H: newHw(), D: newHw() }, hwShow: true,   // v1.1.0 보드별 #S 값
   frames: 0, fps: 0, lastFrameT: 0,
 };
 const now = () => (G.sim ? G.simNow : performance.now());
@@ -274,6 +282,7 @@ function startGame(source, opts) {
   G.lastBeatN = -1; G.lastBeatT = null; G.measBeatMs = null; G.beatCount = 0;
   G.queue = []; G.judgeFx = {}; G.sits = []; G.particles = []; G.stringFx = {}; G.pollen = null; G.flower = {};
   G.meters = { W: 0, D: 0 }; G.holdKey = false; G.ignored = 0; G.lastIgnored = '';
+  INSTS.forEach(i => { const h = G.hw[i]; h.n = 0; h.cpuSum = 0; h.missSum = 0; h.hist = []; });
   recompute();
   if (source === 'auto') planAuto();
   if (source === 'demo') planDemo(opts.seed || 20261118);
@@ -317,7 +326,7 @@ function finish() {
     label: G.label, tempo: G.tempo, source: G.source, score: s.score, max: s.max, accPct, rank,
     detected: s.detected, total: G.notes.length, maxCombo: s.maxCombo, P: s.P, Gd: s.Gd, B: s.B, M: s.M,
     bias: s.bias, jitter: s.jitter, strays: s.strays, ensembleHit: s.ensembleHit, ensembleTotal: s.ensembleTotal,
-    per, measuredBpm: G.measBeatMs ? 60000 / G.measBeatMs : null, csv: buildCSV(),
+    per, hw: hwSummary(), measuredBpm: G.measBeatMs ? 60000 / G.measBeatMs : null, csv: buildCSV(),
   };
   G.runs[G.label] = G.lastSummary;
   G.screen = 'result';
@@ -325,6 +334,8 @@ function finish() {
 function buildCSV() {
   const s = G.stats, L = [];
   L.push('# nabiya-garden ' + CONFIG.version + ',label=' + G.label + ',tempo=' + G.tempo + ',source=' + G.source + ',score=' + s.score + ',max=' + s.max);
+  const hw = hwSummary();
+  if (hw) INSTS.forEach(i => { if (hw.per[i]) L.push('# hw,' + i + ',' + hw.per[i].mode + ',cpu_avg=' + hw.per[i].cpu.toFixed(1) + ',miss_total=' + hw.per[i].miss); });
   L.push('type,inst,beat,note,played,grade,offset_ms,vel');
   for (const n of G.notes) L.push(['N', n.inst, n.beat, n.pitch, n.played || '', n.grade || '', n.offset == null ? '' : Math.round(n.offset), n.vel == null ? '' : n.vel].join(','));
   for (const x of G.strays) L.push(['S', x.inst, x.beat.toFixed(3), '', x.played || '', 'X', '', ''].join(','));
@@ -372,7 +383,11 @@ const INT = /^[+-]?\d+$/;
 function parseLine(raw) {
   const line = String(raw).replace(/[\r\n]+$/, '').trim();
   if (!line) return { kind: 'empty' };
-  const f = line.split(',').map(s => s.trim());
+  const body = line.replace(/^\[[^\]]*\]\s*/, '');            // serial_monitor.py 로그의 "[W] " 머리표는 떼고 읽는다
+  const st = /^#S,([WHD]),(DMA_ON|DMA_OFF),cpu=(\d+(?:\.\d+)?),miss=(\d+)$/.exec(body);
+  if (st) return { kind: 'stat', inst: st[1], mode: st[2], cpu: Number(st[3]), miss: Number(st[4]) };
+  if (body.startsWith('#')) return { kind: 'note', line };   // 그 밖의 # 줄: 로그 창에만 남김
+  const f = body.split(',').map(s => s.trim());
   if (f[0] === 'BEAT') return f.length === 2 && /^\d+$/.test(f[1]) ? { kind: 'beat', n: Number(f[1]) } : { kind: 'bad', line };
   if (f[0] === 'MODE') return f.length === 2 && (f[1] === 'DMA_ON' || f[1] === 'DMA_OFF') ? { kind: 'mode', label: f[1] } : { kind: 'bad', line };
   if (INSTS.includes(f[0]) && (f.length === 6 || f.length === 7)) {
@@ -390,6 +405,8 @@ function handleLine(raw, portId, recvT) {
   G.rawLog.push((portId == null ? '' : '[' + portId + '] ') + String(raw).trim());
   if (G.rawLog.length > 400) G.rawLog.splice(0, G.rawLog.length - 400);
   if (m.kind === 'bad') { G.ignored++; G.lastIgnored = m.line.slice(0, 60); return m; }
+  if (m.kind === 'note') return m;
+  if (m.kind === 'stat') { onStat(m); return m; }
   if (m.kind === 'mode') { G.label = m.label; return m; }
   if (m.kind === 'beat') { onBeat(m.n, recvT === undefined ? now() : recvT); return m; }
   if (G.screen !== 'play' || (G.source !== 'serial' && G.source !== 'replay') || G.waitingUno) return m;
@@ -412,6 +429,22 @@ function handleLine(raw, portId, recvT) {
   if (!open || !grade || grade === 'X') { applyJudgment(null, 'X', m.offset, { inst: m.inst, played: m.pitch, vel: m.inst === 'H' ? null : m.vel }); return m; }
   applyJudgment(note, grade, m.offset, { vel: m.vel, played: m.pitch, wrong: m.pitch !== note.pitch });
   return m;
+}
+/* v1.1.0 #S 줄: 보드가 1초마다 보내는 '센서 읽기에 쓴 CPU %'와 '폴링이 늦어 놓친 샘플 수'. 화면은 받은 값을 그대로 보여 준다 */
+function newHw() { return { mode: null, cpu: null, miss: null, at: null, n: 0, cpuSum: 0, missSum: 0, hist: [] }; }
+function onStat(m) {
+  const h = G.hw[m.inst], t = now();
+  h.mode = m.mode; h.cpu = m.cpu; h.miss = m.miss; h.at = t;
+  h.hist.push(m.cpu); if (h.hist.length > 90) h.hist.shift();            // CPU 그래프용(이번 판)
+  if (G.screen === 'play' && !G.waitingUno && songBeat(t) >= 0) { h.n++; h.cpuSum += m.cpu; h.missSum += m.miss; }   // 곡 중 값만 판 기록에 넣는다
+}
+function hwSummary() {
+  const per = {}, modes = new Set(); let cpu = 0, miss = 0, any = false;
+  INSTS.forEach(i => {
+    const h = G.hw[i]; if (!h.n) { per[i] = null; return; }
+    any = true; per[i] = { mode: h.mode, cpu: h.cpuSum / h.n, miss: h.missSum, n: h.n }; cpu += per[i].cpu; miss += h.missSum; modes.add(h.mode);
+  });
+  return any ? { per, cpu, miss, mixed: modes.size > 1 } : null;
 }
 function onBeat(n, t) {
   if (G.screen === 'play' && G.waitingUno) {           // Uno의 첫 박에 화면 시계를 맞춰 시작
@@ -449,7 +482,7 @@ function startReplay(text) {
   return lines.length;
 }
 function planReplay(lines) {
-  let lastBeat = 0;
+  let lastBeat = 0; const statAt = {};
   for (const item of lines) {
     const line = typeof item === 'string' ? item : item.line;
     const m = parseLine(line);
@@ -458,7 +491,11 @@ function planReplay(lines) {
     else if (m.kind === 'beat') at = m.n;
     else if (m.kind === 'event') at = m.beat + m.offset / G.beatMs;
     else if (m.kind === 'mode') at = -CONFIG.countInBeats;
-    lastBeat = Math.max(lastBeat, at);
+    else if (m.kind === 'stat') {                    // #S 줄은 악기마다 1초 간격으로 (곡 없는 로그도 볼 수 있게)
+      const sec = 1000 / G.beatMs;
+      at = Math.max(lastBeat, (statAt[m.inst] == null ? -CONFIG.countInBeats - sec : statAt[m.inst]) + sec); statAt[m.inst] = at;
+    }
+    if (m.kind !== 'stat') lastBeat = Math.max(lastBeat, at);
     G.queue.push({ beat: at, fn: () => handleLine(line, 'log') });
   }
 }
@@ -1023,8 +1060,10 @@ function drawPlay(t) {
   hx += text('흔들림 ±' + jit + 'ms', hx, 782, 15, PAPER, { base: 'middle' }) + 28;
   hx += text('헛음 ' + s.strays, hx, 782, 15, PAPER, { base: 'middle' }) + 28;
   text('합주 일치 ' + s.ensembleHit + '/' + s.ensembleDone + '박', hx, 782, 15, PAPER, { base: 'middle' });
-  const right = G.ignored ? '무시한 줄 ' + G.ignored + ' · ' + G.lastIgnored : (G.source === 'keyboard' ? 'Shift+키 = 음 틀림 흉내 · A를 누르고 있으면 유지' : 'L 로그');
+  const right = G.ignored ? '무시한 줄 ' + G.ignored + ' · ' + G.lastIgnored : (G.source === 'keyboard' ? 'Shift+키 = 음 틀림 흉내 · A를 누르고 있으면 유지' : 'L 로그 · H 부담 패널');
   text(right, W - 32, 782, 13, '#c9c4b4', { align: 'right', base: 'middle' });
+
+  drawHwPanel(t);
 
   // 카운트
   if (G.waitingUno) {
@@ -1037,6 +1076,44 @@ function drawPlay(t) {
     text(String(n), 870, 405, 190 + 40 * k, INK, { jua: true, align: 'center', base: 'middle', halo: 'rgba(255,250,240,.9)', haloW: 14 });
     ctx.globalAlpha = 1;
   }
+}
+
+/* v1.1.0 우측 상단 '센서 읽기 부담' 패널: 보드가 보낸 #S 값을 그대로 보여 준다(1초마다 갱신). H 키로 숨김 */
+function drawHwPanel(t) {
+  if (!G.hwShow || !INSTS.some(i => G.hw[i].at != null)) return;
+  const C = CONFIG.hwPanel, x = C.x, y = C.y, w = C.w, GREY = '#c9c4b4', ON = '#8cc66f', OFF = '#f08a6b', WARN = '#ffb199';
+  ctx.globalAlpha = 0.93; rr(x, y, w, 214, 16, INK); ctx.globalAlpha = 1;
+  const fresh = i => G.hw[i].at != null && t - G.hw[i].at < C.staleMs;
+  const modes = [...new Set(INSTS.filter(fresh).map(i => G.hw[i].mode))];
+  const other = (modes.length === 1 ? modes[0] : G.label) === 'DMA_ON' ? 'DMA_OFF' : 'DMA_ON', ref = G.runs[other] && G.runs[other].hw;
+  text('센서 읽기 부담 · 실시간', x + 16, y + 23, 15, PAPER, { bold: true, base: 'middle' });
+  const tag = !modes.length ? ['값 끊김', SUB, PAPER] : modes.length > 1 ? ['보드마다 모드가 다름', OFF, INK] : modes[0] === 'DMA_ON' ? ['DMA ON', ON, INK] : ['DMA OFF (폴링)', OFF, INK];
+  pill(tag[0], x + w - 14, y + 10, 12, tag[1], tag[2], { align: 'right' });
+  INSTS.forEach((inst, k) => {
+    const h = G.hw[inst], ry = y + 58 + k * 46, ok = fresh(inst), col = ok ? PAPER : SUB, mc = h.mode === 'DMA_ON' ? ON : OFF;
+    // 윗줄: 이름 · CPU 막대(세로 금 = 지난 반대 모드 판 평균) · CPU % · 이번 판 CPU 그래프
+    text(INST_NAME[inst], x + 16, ry, 14, col, { bold: true, base: 'middle' });
+    rr(x + 66, ry - 6, 90, 12, 6, 'rgba(255,250,240,.14)');
+    if (ok && h.cpu > 0) rr(x + 66, ry - 6, Math.max(6, 90 * Math.min(h.cpu, C.cpuFull) / C.cpuFull), 12, 6, mc);
+    if (ref && ref.per[inst]) { ctx.fillStyle = PAPER; ctx.fillRect(x + 66 + 90 * Math.min(ref.per[inst].cpu, C.cpuFull) / C.cpuFull - 1, ry - 9, 2, 18); }
+    text(ok ? h.cpu.toFixed(1) + '%' : '—', x + 220, ry, 15, col, { bold: true, align: 'right', base: 'middle' });
+    const gx = x + 232, gw = w - 232 - 14, gh = 18;
+    rr(gx, ry - gh / 2, gw, gh, 4, 'rgba(255,250,240,.07)');
+    if (h.hist.length > 1) {
+      ctx.beginPath();
+      h.hist.forEach((v, i) => { const px = gx + 2 + (gw - 4) * i / 89, py = ry + gh / 2 - 2 - (gh - 4) * Math.min(v, C.cpuFull) / C.cpuFull; if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py); });
+      ctx.lineWidth = 2; ctx.strokeStyle = ok ? mc : SUB; ctx.lineJoin = 'round'; ctx.stroke();
+    }
+    // 아랫줄: 놓친 샘플(1초·이번 판 누적·못 본 시간) · 흔들림 · Miss
+    const p = G.stats && G.stats.per[inst], bad = h.missSum > 0 || (ok && h.miss > 0);
+    let lx = x + 16;
+    lx += text('놓친 샘플 ' + (ok ? h.miss : '—') + '/초 · 누적 ' + h.missSum + '개 (' + (h.missSum * C.sampleMs).toFixed(0) + 'ms 못 봄)', lx, ry + 19, 12, bad ? WARN : GREY, { bold: bad, base: 'middle' });
+    text(' · 흔들림 ' + (p && p.offs.length > 1 ? '±' + Math.round(p.jitter) + 'ms' : '—') + ' · Miss ' + (p ? p.M : 0), lx, ry + 19, 12, GREY, { base: 'middle' });
+  });
+  const foot = ref
+    ? '흰 금 = 지난 ' + other.replace('_', ' ') + ' 판 · ' + INSTS.filter(i => ref.per[i]).map(i => INST_NAME[i] + ' ' + ref.per[i].cpu.toFixed(1) + '%').join(' · ') + ' · 놓침 ' + ref.miss + '개'
+    : 'CPU = 센서 읽기에 쓴 몫(보드가 1초마다 보냄) · 그래프 = 이번 판 · H 숨김';
+  text(foot, x + 16, y + 197, 12, GREY, { base: 'middle' });
 }
 
 /* ---------------- 결과 화면 ---------------- */
@@ -1092,27 +1169,32 @@ function drawResult(t) {
   rr(px, 40, pw, 730, 24, INK);
   const on = G.runs.DMA_ON, off = G.runs.DMA_OFF, both = on && off;
   let head = 'DMA ON vs OFF 비교', subh = '같은 곡을 DMA ON 한 판, OFF(폴링) 한 판';
-  if (both) head = on.M < off.M ? 'DMA가 놓친 박을 줄였다' : on.M > off.M ? 'DMA ON 쪽 Miss가 더 많다' : 'Miss 수는 같다';
+  if (both && on.hw && off.hw && on.hw.cpu > 0) {       // v1.1.0 보드 값이 두 판 다 있으면 CPU·놓친 샘플이 제목
+    const k = off.hw.cpu / on.hw.cpu;
+    head = k >= 1.5 ? 'DMA가 CPU를 ' + (k >= 10 ? Math.round(k) : k.toFixed(1)) + '배 아꼈다' : k > 1.05 ? 'DMA 쪽 CPU가 조금 낮다' : 'CPU 차이가 거의 없다';
+    subh = '센서 읽기 CPU ' + on.hw.cpu.toFixed(1) + '% → ' + off.hw.cpu.toFixed(1) + '% · 놓친 샘플 ' + on.hw.miss + '개 → ' + off.hw.miss + '개';
+  }
+  else if (both) head = on.M < off.M ? 'DMA가 놓친 박을 줄였다' : on.M > off.M ? 'DMA ON 쪽 Miss가 더 많다' : 'Miss 수는 같다';
   else subh = '다른 판을 해보세요 · 시작 화면에서 ' + (on ? 'DMA OFF' : 'DMA ON') + '로 바꿔 한 판 더';
   text(head, px + 28, 66, 30, PAPER, { jua: true });
   text(subh, px + 28, 108, 14, '#c9c4b4');
   if (both && on.tempo !== off.tempo) pill('템포가 달라요 · ON ' + on.tempo + ' / OFF ' + off.tempo + ' BPM', px + 28, 132, 13, '#f08a6b', INK, { padY: 5 });
   const rows = [
-    ['Miss (감지 안 됨)', x => x.M, '회', true], ['Bad (박자에서 멂 · 음 틀림 포함)', x => x.B, '회', true],
-    ['흔들림 (오차 표준편차)', x => round5(x.jitter), 'ms', true], ['합주 일치 박 (' + (r.ensembleTotal) + '박 중)', x => x.ensembleHit, '박', false],
+    ['센서 읽기 CPU (세 악기 합 · 곡 평균)', x => x.hw ? Math.round(x.hw.cpu * 10) / 10 : null, '%', true], ['놓친 센서 샘플 (곡 전체)', x => x.hw ? x.hw.miss : null, '개', true],
+    ['Miss (감지 안 된 음)', x => x.M, '회', true], ['흔들림 (오차 표준편차)', x => round5(x.jitter), 'ms', true],
   ];
   rows.forEach((row, i) => {
     const y = 176 + i * 106, a = on ? row[1](on) : null, bb = off ? row[1](off) : null, max = Math.max(a || 0, bb || 0, 1);
     text(row[0], px + 28, y, 16, PAPER, { bold: true });
-    [['DMA ON', a, '#8cc66f'], ['OFF', bb, '#f08a6b']].forEach((v, k) => {
+    [['DMA ON', a, '#8cc66f', on], ['OFF', bb, '#f08a6b', off]].forEach((v, k) => {
       const by = y + 30 + k * 32;
       text(v[0], px + 28, by + 11, 14, PAPER, { base: 'middle' });
       rr(px + 100, by, 250, 22, 11, 'rgba(255,250,240,.12)');
       if (v[1] != null && v[1] > 0) rr(px + 100, by, Math.max(22, 250 * v[1] / max), 22, 11, v[2]);
-      text(v[1] == null ? '아직 없음' : v[1] + row[2], px + pw - 28, by + 11, v[1] == null ? 13 : 17, v[1] == null ? '#c9c4b4' : PAPER, { bold: v[1] != null, align: 'right', base: 'middle' });
+      text(v[1] == null ? (v[3] ? '보드 값 없음' : '아직 없음') : v[1] + row[2], px + pw - 28, by + 11, v[1] == null ? 13 : 17, v[1] == null ? '#c9c4b4' : PAPER, { bold: v[1] != null, align: 'right', base: 'middle' });
     });
   });
-  text('막대가 길수록 값이 큼 · 합주 일치는 클수록 좋음', px + 28, 612, 13, '#c9c4b4');
+  text('막대가 길수록 값이 큼 · 네 항목 모두 작을수록 좋음', px + 28, 612, 13, '#c9c4b4');
   button('다시 (Space)', px + 28, 690, 200, 52, { r: 14, size: 20, bg: '#ffe27a', border: null, fn: () => startFromTitle() });
   button('기록 CSV 복사', px + 240, 690, 200, 52, { r: 14, size: 20, bg: INK, fg: PAPER, border: PAPER, fn: () => copyCSV() });
   button('시작 화면', px + 28, 640, 412, 40, { r: 12, size: 16, bg: INK, fg: PAPER, border: 'rgba(255,250,240,.4)', fn: () => { G.screen = 'title'; } });
@@ -1149,6 +1231,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Escape') { closePanels(); if (G.screen !== 'title' && !inField(e)) G.screen = 'title'; return; }
   if (inField(e) || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.code === 'KeyL') { togglePanel('logPanel'); e.preventDefault(); return; }
+  if (e.code === 'KeyH') { G.hwShow = !G.hwShow; return; }
   if (e.code === 'KeyT') { startGame('auto'); return; }
   if (e.code === 'KeyR') { startGame('demo', { seed: Math.floor(performance.now()) }); return; }
   if (e.code === 'Space') {
@@ -1185,7 +1268,7 @@ setInterval(() => { if (document.getElementById('logPanel').classList.contains('
 window.addEventListener('resize', resize);
 
 /* 시작 */
-window.__nabiya = { CONFIG, G, Serial, buildChart, startGame, update, draw, songBeat, keyHit, keyRelease, handleLine, parseLine, makeSplitter, startReplay, finish, recompute, IMG };
+window.__nabiya = { CONFIG, G, Serial, onStat, hwSummary, buildChart, startGame, update, draw, songBeat, keyHit, keyRelease, handleLine, parseLine, makeSplitter, startReplay, finish, recompute, IMG };
 resize(); loadAssets(); recompute(); Serial.auto();
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => {});
 requestAnimationFrame(frame);
