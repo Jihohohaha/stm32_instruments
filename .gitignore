@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# STM32CubeIDE 빌드 결과물·워크스페이스
+**/Debug/
+**/Release/
+.metadata/
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.map
+*.list
+
+# 리듬게임: Higgsfield 원본(손질 전 큰 파일), 영상
+game/nabiya-garden/assets/original/
+*.mp4
+
+# 압축본
+*.zip
