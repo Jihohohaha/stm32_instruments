@@ -618,6 +618,9 @@ int main(void)
     __disable_irq();
     clock_init();
     gpio_uart_init();
+    /* [합주] 박자 입력 PB5(EXTI5), B1, I2C, MODE 줄. 타이머·DMA를 켜기 전에 해야 한다:
+     * 이 안에서 UART·I2C로 몇 ms 보내는 동안 인터럽트가 꺼져 있으면 DMA 반 버퍼(2ms)를 놓쳐 FAULT=12가 걸린다 */
+    link_init();
     NVIC_SetPriorityGrouping(0U);
     adc_dma_init();
     audio_dma_init();
@@ -628,7 +631,6 @@ int main(void)
                     SysTick_CTRL_ENABLE_Msk;
     TIM4->CR1 |= TIM_CR1_CEN;
     TIM3->CR1 |= TIM_CR1_CEN;
-    link_init();                     /* [합주] 박자 입력 PB5(EXTI5), B1, MODE 줄 */
     __enable_irq();
     uart_text("#DRUM PIEZO ENABLED F103RB ADC1/DMA1_CH1 TIM4_UP/DMA1_CH7\r\n"
               "#B1 = DMA ON/OFF. T: kick/snare/both test. K/S/B: manual hits.\r\n");
