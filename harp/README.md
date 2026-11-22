@@ -15,12 +15,12 @@
 
 | 파일 | 내용 |
 | --- | --- |
-| `Src/main.c` | **합주 패치 적용판(11/22).** 원본은 커밋 `66392e2`(yeoniix 업로드). 바뀐 줄은 `git diff 66392e2 -- harp/Src/main.c` |
-| `Src/ensemble_link.c`, `Inc/ensemble_link.h` | 세 보드 공통 연결 모듈(`common/`과 같은 파일) |
-| `Inc/ensemble_link_cfg.h` | 하프용 설정: `LINK_INST 'H'`, I²C 켬 |
-| 나머지 `Src/*.c` | 원본 그대로 |
+| `DMA_Project/` | 하프 CubeIDE 프로젝트 전체(11/22 yeoniix 업로드, 커밋 `9e98a55`). Import해서 바로 빌드한다 |
+| `DMA_Project/Core/Src/main.c` | 합주 패치 적용판. 원본은 커밋 `66392e2` |
+| `DMA_Project/Core/Src/ensemble_link.c`, `Core/Inc/ensemble_link.h` | 세 보드 공통 연결 모듈(`common/`과 같은 파일) |
+| `DMA_Project/Core/Inc/ensemble_link_cfg.h` | 하프용 설정: `LINK_INST 'H'`, I²C 켬 |
 
-**하프 담당이 빌드하는 법:** 자기 CubeIDE 프로젝트에 `Src/main.c`, `Src/ensemble_link.c`는 `Core/Src`로, `Inc/` 두 파일은 `Core/Inc`로 복사한다. 그다음 빌드한다. 이 폴더에는 `Inc/main.h`, `.ioc`, `Drivers/`가 없어서 이 폴더만으로는 빌드할 수 없다. **프로젝트 전체를 올려 주면** 다음부터는 바로 빌드된다.
+**빌드:** CubeIDE에서 File → Import → Existing Projects into Workspace로 `harp/DMA_Project`를 연다. "Copy projects into workspace"는 체크를 뺀다. 그다음 Build한다. `.ioc`로 Generate Code를 하면 USER CODE 밖이 덮어써지니 주의한다.
 
 ## 합주 패치 (11/22)
 
@@ -46,7 +46,7 @@
 - [x] 게임 줄이 없었다 → 패치 4번
 - [x] 센서 DMA가 없어 ON/OFF 비교를 할 수 없었다 → 패치 1~3번
 - [x] 박자 입력이 없었다 → 공통 모듈이 PB5(EXTI5)로 받는다. 하프의 `stm32f1xx_it.c`에 EXTI9_5 핸들러가 없어서 그대로 쓸 수 있다
-- [ ] 프로젝트 전체(`Inc/`, `.ioc`, `Drivers/`)를 아직 올리지 않았다
+- [x] 프로젝트 전체를 올렸다(`DMA_Project/`, 11/22)
 
 **사소한 것 / 확인 필요**
 

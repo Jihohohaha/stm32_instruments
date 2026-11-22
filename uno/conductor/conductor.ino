@@ -87,6 +87,23 @@ volatile uint8_t rxHead = 0, rxTail = 0;   // head = 넣을 칸, tail = 꺼낼 �
 volatile uint16_t rxDrop = 0;
 volatile uint16_t rxCount = 0, rxW = 0, rxH = 0, rxD = 0;   // 진단: 받은 줄 수(악기별은 #S·연주 줄의 첫 글자로)
 
+// 진단: SDA(A4=PC4)·SCL(A5=PC5) 선이 바뀐 횟수. 누가 I2C로 보내려고 시도라도 하는지 본다.
+// 핀 변화 인터럽트(PCINT12·13). 연주 중에는 꺼서 박자 타이밍에 영향 없게.
+volatile uint16_t sclEdges = 0, sdaEdges = 0;
+volatile uint8_t  pcLast = 0;
+ISR(PCINT1_vect)
+{
+  uint8_t p = PINC, ch = p ^ pcLast;
+  pcLast = p;
+  if (ch & _BV(5)) sclEdges++;
+  if (ch & _BV(4)) sdaEdges++;
+}
+void edgeWatch(bool on)
+{
+  if (on) { pcLast = PINC; PCMSK1 |= _BV(PCINT12) | _BV(PCINT13); PCICR |= _BV(PCIE1); }
+  else    { PCMSK1 &= ~(_BV(PCINT12) | _BV(PCINT13)); }
+}
+
 void onI2cReceive(int n)               // TWI 인터럽트 안: 복사만 하고 바로 끝
 {
   uint8_t next = (rxHead + 1) % RX_LINES;
@@ -194,6 +211,7 @@ void startSong(uint16_t newBpm)
   stepIdx = 0;
   state = COUNTING;
   evalReset();
+  edgeWatch(false);
   Serial.print(F("#start bpm="));
   Serial.println(bpm);
 }
@@ -205,7 +223,8 @@ void stopSong(bool byUser)
   pulseHigh = false;
   Serial.println(byUser ? F("END,STOP") : F("END"));
   endedMs = millis();
-  evalPending = true;                  // 마지막 박 뒤 늦게 오는 줄(최대 반 박 + 전송)을 기다렸다가 출력
+  evalPending = true;
+  edgeWatch(true);                  // 마지막 박 뒤 늦게 오는 줄(최대 반 박 + 전송)을 기다렸다가 출력
 }
 
 /* ===== 박 하나 처리 ===== */
@@ -286,6 +305,7 @@ void setup()
   Serial.begin(115200);
   Wire.begin(I2C_ADDR);                // 슬레이브. 내부 풀업도 켜지지만 외부 4.7kΩ(5V)을 꼭 다는 것을 권장
   Wire.onReceive(onI2cReceive);
+  edgeWatch(true);
   Serial.println(F("#conductor v1 ready (I2C 0x08): send START or START,<bpm>, or press D2"));
 }
 
@@ -325,8 +345,13 @@ void loop()
     Serial.print(F("#UNO,rx=")); Serial.print(rxCount);
     Serial.print(F(",W=")); Serial.print(rxW); Serial.print(F(",H=")); Serial.print(rxH);
     Serial.print(F(",D=")); Serial.print(rxD); Serial.print(F(",drop=")); Serial.print(rxDrop);
+    noInterrupts();
+    uint16_t se = sclEdges, de = sdaEdges; sclEdges = 0; sdaEdges = 0;
+    interrupts();
     Serial.print(F(",sda=")); Serial.print((PINC >> 4) & 1);
-    Serial.print(F(",scl=")); Serial.println((PINC >> 5) & 1);
+    Serial.print(F(",scl=")); Serial.print((PINC >> 5) & 1);
+    Serial.print(F(",sclEdge=")); Serial.print(se);          // 2초 동안 SCL이 바뀐 횟수 (65535에서 멈춤 없이 넘칠 수 있음)
+    Serial.print(F(",sdaEdge=")); Serial.println(de);
   }
   if (evalPending && millis() - endedMs >= 1500) {   // END 뒤 1.5초 기다렸다가 채점 출력
     evalPending = false;

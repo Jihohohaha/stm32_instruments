@@ -316,13 +316,10 @@ static void i2c_bus_recover(void)
     cfg_pin(GPIOB, 9, 0xF);
 }
 
-static void i2c_init(void)
+/* I2C 내부만 초기화 (선은 건드리지 않음 → 다른 보드의 전송을 방해하지 않는다). 실패할 때마다 이것만 */
+static void i2c_hw_reset(void)
 {
-    RCC->APB2ENR |= RCC_APB2ENR_IOPBEN | RCC_APB2ENR_AFIOEN;
-    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
-    AFIO->MAPR   |= AFIO_MAPR_I2C1_REMAP;               /* I2C1 → PB8/PB9 */
-    i2c_bus_recover();
-    I2C1->CR1 = I2C_CR1_SWRST;                          /* BUSY가 굳은 상태를 푼다 */
+    I2C1->CR1 = I2C_CR1_SWRST;                          /* BUSY·START/STOP 명령이 남은 상태를 푼다 */
     I2C1->CR1 = 0;
     extern const uint8_t APBPrescTable[8];
     uint32_t pclk1 = SystemCoreClock >> APBPrescTable[(RCC->CFGR & RCC_CFGR_PPRE1) >> RCC_CFGR_PPRE1_Pos];
@@ -331,6 +328,16 @@ static void i2c_init(void)
     I2C1->CCR   = pclk1 / (2u * 100000u);               /* 표준 모드 100kHz */
     I2C1->TRISE = mhz + 1u;
     I2C1->CR1   = I2C_CR1_PE;
+}
+
+/* 켤 때 한 번: 핀 설정 + 버스 풀기(공용 선에 클럭·STOP을 직접 만듦) + 내부 초기화 */
+static void i2c_init(void)
+{
+    RCC->APB2ENR |= RCC_APB2ENR_IOPBEN | RCC_APB2ENR_AFIOEN;
+    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
+    AFIO->MAPR   |= AFIO_MAPR_I2C1_REMAP;               /* I2C1 → PB8/PB9 */
+    i2c_bus_recover();
+    i2c_hw_reset();
 }
 
 static uint8_t i2c_wait(volatile uint32_t *reg, uint32_t mask, uint32_t t0, uint32_t limit)
@@ -346,6 +353,9 @@ static int i2c_write_once(const char *s, int n)
 {
     const uint32_t limit = SystemCoreClock / 1000u * LINK_I2C_TIMEOUT_MS;
     const uint32_t t0 = DWT->CYCCNT;
+    if ((I2C1->CR1 & (I2C_CR1_START | I2C_CR1_STOP)) || !(I2C1->CR1 & I2C_CR1_PE)) {
+        i2c_reinit++; i2c_hw_reset();                   /* 지난번 START/STOP 명령이 남아 있으면 깨끗하게 */
+    }
     while (I2C1->SR2 & I2C_SR2_BUSY) {                  /* 다른 보드가 보내는 중 */
         if ((DWT->CYCCNT - t0) > limit) { i2c_to_busy++; goto fail; }
     }
@@ -367,17 +377,15 @@ fail:
         uint32_t sr1 = I2C1->SR1;
         if (sr1 & I2C_SR1_AF) i2c_af++;                 /* NACK: Uno가 대답 안 함 (주소·SDA/SCL·Uno 코드) */
         else if (sr1 & I2C_SR1_ARLO) i2c_arlo++;        /* 다른 보드와 부딪힘 (정상적으로 생길 수 있음) */
-        else if (sr1 & I2C_SR1_BERR) i2c_berr++;        /* 버스 오류: 잡음·배선 */
-        else if (!(I2C1->SR2 & I2C_SR2_BUSY) || (DWT->CYCCNT - t0) > limit) i2c_to_step++;
-        if (sr1 & I2C_SR1_ARLO) {                       /* 중재에서 짐: 버스는 다른 보드 것. STOP 안 보냄 */
-            I2C1->SR1 = ~I2C_SR1_ARLO;
-        } else {
-            I2C1->SR1 = ~(I2C_SR1_AF | I2C_SR1_BERR);   /* NACK(Uno 없음)·버스 오류 지우고 STOP */
+        else if (sr1 & I2C_SR1_BERR) i2c_berr++;        /* 버스 오류: 다른 보드가 끼어듦·잡음 */
+        else i2c_to_step++;                             /* 오류 표시 없이 시간 초과 */
+        if (I2C1->SR2 & I2C_SR2_MSL) {                  /* 내가 마스터로 버스를 잡고 있을 때만 STOP */
             I2C1->CR1 |= I2C_CR1_STOP;
+            uint32_t t1 = DWT->CYCCNT;
+            while ((I2C1->CR1 & I2C_CR1_STOP) && (DWT->CYCCNT - t1) < limit) { }
         }
-        uint32_t t1 = DWT->CYCCNT;
-        while ((I2C1->CR1 & I2C_CR1_STOP) && (DWT->CYCCNT - t1) < limit) { }
-        if (!(sr1 & I2C_SR1_ARLO) && (I2C1->SR2 & I2C_SR2_BUSY)) { i2c_reinit++; i2c_init(); }   /* 굳었으면 다시 */
+        i2c_reinit++;
+        i2c_hw_reset();                                 /* 실패하면 매번 I2C 내부 초기화 (F103은 오류 뒤 상태가 남음) */
     }
     return -1;
 }
