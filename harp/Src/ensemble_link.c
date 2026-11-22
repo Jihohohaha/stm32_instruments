@@ -282,18 +282,47 @@ static void poll_button(uint32_t now)
  * 리맵 핀 PB8 = SCL, PB9 = SDA, 100kHz. 세 보드가 같은 버스의 마스터라 충돌하면 하드웨어 중재(ARLO)로 한쪽이 지고, 진 쪽은 잠깐 뒤 다시 보낸다.
  * 시간 재기는 DWT 사이클 카운터(인터럽트가 꺼져 있어도 동작) */
 #if LINK_I2C_ENABLE
-static uint32_t i2c_fail;
+/* 진단 숫자: UART에만 2초마다 "#I2C,..." 줄로 찍는다 (I2C가 안 될 때 원인을 보려고) */
+static uint32_t i2c_ok, i2c_fail, i2c_af, i2c_arlo, i2c_berr, i2c_to_busy, i2c_to_step, i2c_reinit;
+static uint8_t  i2c_lines_low;   /* 초기화 때 SCL/SDA가 HIGH로 안 올라왔으면 1 (풀업 없음·GND와 붙음) */
 
 static void cfg_pin(GPIO_TypeDef *g, uint32_t pin, uint32_t nibble);
+
+static void i2c_delay_us(uint32_t us)
+{
+    uint32_t t0 = DWT->CYCCNT, n = SystemCoreClock / 1000000u * us;
+    while ((DWT->CYCCNT - t0) < n) { }
+}
+
+/* F103 I2C 결함(ES096 "analog filter may provide wrong value, locking BUSY flag") 풀기 + 버스 복구:
+ * 핀을 잠깐 GPIO 오픈드레인으로 바꿔 SCL을 9번 흔들고(누가 SDA를 잡고 있으면 놓게), STOP 모양을 만든 뒤
+ * 다시 대체기능으로 돌리고 SWRST */
+static void i2c_bus_recover(void)
+{
+    I2C1->CR1 &= ~I2C_CR1_PE;
+    GPIOB->BSRR = (1u << 8) | (1u << 9);                /* 둘 다 놓기(HIGH) */
+    cfg_pin(GPIOB, 8, 0x7);                             /* 범용 오픈드레인 50MHz */
+    cfg_pin(GPIOB, 9, 0x7);
+    i2c_delay_us(10);
+    for (int i = 0; i < 9 && !(GPIOB->IDR & (1u << 9)); i++) {   /* SDA가 LOW면 SCL 클럭 9번 */
+        GPIOB->BRR = (1u << 8); i2c_delay_us(5);
+        GPIOB->BSRR = (1u << 8); i2c_delay_us(5);
+    }
+    GPIOB->BRR  = (1u << 9); i2c_delay_us(5);           /* SDA LOW → SCL HIGH 상태에서 SDA HIGH = STOP */
+    GPIOB->BSRR = (1u << 8); i2c_delay_us(5);
+    GPIOB->BSRR = (1u << 9); i2c_delay_us(5);
+    i2c_lines_low = ((GPIOB->IDR & ((1u << 8) | (1u << 9))) != ((1u << 8) | (1u << 9)));
+    cfg_pin(GPIOB, 8, 0xF);                             /* 대체기능 오픈드레인 50MHz */
+    cfg_pin(GPIOB, 9, 0xF);
+}
 
 static void i2c_init(void)
 {
     RCC->APB2ENR |= RCC_APB2ENR_IOPBEN | RCC_APB2ENR_AFIOEN;
     RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
     AFIO->MAPR   |= AFIO_MAPR_I2C1_REMAP;               /* I2C1 → PB8/PB9 */
-    cfg_pin(GPIOB, 8, 0xF);                             /* 대체기능 오픈드레인 50MHz */
-    cfg_pin(GPIOB, 9, 0xF);
-    I2C1->CR1 = I2C_CR1_SWRST;                          /* 버스가 BUSY로 굳는 경우를 풀기 위해 리셋부터 */
+    i2c_bus_recover();
+    I2C1->CR1 = I2C_CR1_SWRST;                          /* BUSY가 굳은 상태를 푼다 */
     I2C1->CR1 = 0;
     extern const uint8_t APBPrescTable[8];
     uint32_t pclk1 = SystemCoreClock >> APBPrescTable[(RCC->CFGR & RCC_CFGR_PPRE1) >> RCC_CFGR_PPRE1_Pos];
@@ -318,7 +347,7 @@ static int i2c_write_once(const char *s, int n)
     const uint32_t limit = SystemCoreClock / 1000u * LINK_I2C_TIMEOUT_MS;
     const uint32_t t0 = DWT->CYCCNT;
     while (I2C1->SR2 & I2C_SR2_BUSY) {                  /* 다른 보드가 보내는 중 */
-        if ((DWT->CYCCNT - t0) > limit) goto fail;
+        if ((DWT->CYCCNT - t0) > limit) { i2c_to_busy++; goto fail; }
     }
     I2C1->CR1 |= I2C_CR1_START;
     if (!i2c_wait(&I2C1->SR1, I2C_SR1_SB, t0, limit)) goto fail;
@@ -331,10 +360,15 @@ static int i2c_write_once(const char *s, int n)
     }
     if (!i2c_wait(&I2C1->SR1, I2C_SR1_BTF, t0, limit)) goto fail;
     I2C1->CR1 |= I2C_CR1_STOP;
+    i2c_ok++;
     return 0;
 fail:
     {
         uint32_t sr1 = I2C1->SR1;
+        if (sr1 & I2C_SR1_AF) i2c_af++;                 /* NACK: Uno가 대답 안 함 (주소·SDA/SCL·Uno 코드) */
+        else if (sr1 & I2C_SR1_ARLO) i2c_arlo++;        /* 다른 보드와 부딪힘 (정상적으로 생길 수 있음) */
+        else if (sr1 & I2C_SR1_BERR) i2c_berr++;        /* 버스 오류: 잡음·배선 */
+        else if (!(I2C1->SR2 & I2C_SR2_BUSY) || (DWT->CYCCNT - t0) > limit) i2c_to_step++;
         if (sr1 & I2C_SR1_ARLO) {                       /* 중재에서 짐: 버스는 다른 보드 것. STOP 안 보냄 */
             I2C1->SR1 = ~I2C_SR1_ARLO;
         } else {
@@ -343,7 +377,7 @@ fail:
         }
         uint32_t t1 = DWT->CYCCNT;
         while ((I2C1->CR1 & I2C_CR1_STOP) && (DWT->CYCCNT - t1) < limit) { }
-        if (!(sr1 & I2C_SR1_ARLO) && (I2C1->SR2 & I2C_SR2_BUSY)) i2c_init();   /* 굳었으면 다시 */
+        if (!(sr1 & I2C_SR1_ARLO) && (I2C1->SR2 & I2C_SR2_BUSY)) { i2c_reinit++; i2c_init(); }   /* 굳었으면 다시 */
     }
     return -1;
 }
@@ -357,6 +391,29 @@ static void i2c_send(const char *s, int n)
         while ((DWT->CYCCNT - t0) < back) { }
     }
     i2c_fail++;
+}
+
+/* UART에만: #I2C,ok=..,fail=..,af=..,arlo=..,berr=..,busy=..,step=..,re=..,low=..,lines=SCL/SDA */
+static void i2c_diag(uint32_t now)
+{
+    static uint32_t t;
+    if ((now - t) < 2000u) return;
+    t = now;
+    char b[120]; int n = 0;
+    n += put_str(b + n, "#I2C,ok=");  n += put_int(b + n, (int32_t)i2c_ok, 0);
+    n += put_str(b + n, ",fail=");    n += put_int(b + n, (int32_t)i2c_fail, 0);
+    n += put_str(b + n, ",af=");      n += put_int(b + n, (int32_t)i2c_af, 0);
+    n += put_str(b + n, ",arlo=");    n += put_int(b + n, (int32_t)i2c_arlo, 0);
+    n += put_str(b + n, ",berr=");    n += put_int(b + n, (int32_t)i2c_berr, 0);
+    n += put_str(b + n, ",busy=");    n += put_int(b + n, (int32_t)i2c_to_busy, 0);
+    n += put_str(b + n, ",step=");    n += put_int(b + n, (int32_t)i2c_to_step, 0);
+    n += put_str(b + n, ",re=");      n += put_int(b + n, (int32_t)i2c_reinit, 0);
+    n += put_str(b + n, ",low=");     n += put_int(b + n, (int32_t)i2c_lines_low, 0);
+    n += put_str(b + n, ",lines=");
+    b[n++] = (GPIOB->IDR & (1u << 8)) ? '1' : '0'; b[n++] = '/';
+    b[n++] = (GPIOB->IDR & (1u << 9)) ? '1' : '0';
+    b[n++] = '\r'; b[n++] = '\n';
+    link_uart_write(b, n);
 }
 #else
 __attribute__((unused)) static void i2c_send(const char *s, int n) { (void)s; (void)n; }
@@ -459,4 +516,7 @@ void link_loop(void)
     drain_events();
     poll_button(now);
     print_stat(now);
+#if LINK_I2C_ENABLE && LINK_UART_ENABLE && !defined(LINK_HOST_TEST)
+    i2c_diag(now);
+#endif
 }

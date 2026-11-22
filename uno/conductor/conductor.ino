@@ -85,6 +85,7 @@ volatile char    rxBuf[RX_LINES][RX_LEN + 1];
 volatile uint8_t rxLen[RX_LINES];
 volatile uint8_t rxHead = 0, rxTail = 0;   // head = 넣을 칸, tail = 꺼낼 칸
 volatile uint16_t rxDrop = 0;
+volatile uint16_t rxCount = 0, rxW = 0, rxH = 0, rxD = 0;   // 진단: 받은 줄 수(악기별은 #S·연주 줄의 첫 글자로)
 
 void onI2cReceive(int n)               // TWI 인터럽트 안: 복사만 하고 바로 끝
 {
@@ -98,6 +99,9 @@ void onI2cReceive(int n)               // TWI 인터럽트 안: 복사만 하고
   if (k == 0) return;
   rxBuf[rxHead][k] = '\0';
   rxLen[rxHead] = k;
+  rxCount++;
+  char c0 = rxBuf[rxHead][0] == '#' && k > 3 ? rxBuf[rxHead][3] : rxBuf[rxHead][0];   // "#S,W,..." → W
+  if (c0 == 'W') rxW++; else if (c0 == 'H') rxH++; else if (c0 == 'D') rxD++;
   rxHead = next;
   (void)n;
 }
@@ -313,6 +317,17 @@ void loop()
   }
 
   forwardLines();                      // I2C로 받은 줄 → USB
+
+  // 진단: 쉬는 동안 2초마다 Uno 쪽 I2C 상태. sda/scl은 선 전압(1 = HIGH 정상, 0 = LOW로 붙음)
+  static uint32_t diagMs = 0;
+  if (state == IDLE && !evalPending && millis() - diagMs >= 2000 && Serial.availableForWrite() > 50) {
+    diagMs = millis();
+    Serial.print(F("#UNO,rx=")); Serial.print(rxCount);
+    Serial.print(F(",W=")); Serial.print(rxW); Serial.print(F(",H=")); Serial.print(rxH);
+    Serial.print(F(",D=")); Serial.print(rxD); Serial.print(F(",drop=")); Serial.print(rxDrop);
+    Serial.print(F(",sda=")); Serial.print((PINC >> 4) & 1);
+    Serial.print(F(",scl=")); Serial.println((PINC >> 5) & 1);
+  }
   if (evalPending && millis() - endedMs >= 1500) {   // END 뒤 1.5초 기다렸다가 채점 출력
     evalPending = false;
     forwardLines();
