@@ -5,6 +5,7 @@
   v1.0 — 나비야 정원 원샷 빌드
   v1.0.1 — 배경 그림을 세 조각으로 자르지 않고 노트 영역(x 240~1440, y 100~746)에 한 장으로 그림, 행 사이 틈은 얇은 반투명 선 (요청목록 8번)
   v1.0.2 — 배경 위 흰 막을 행별로 조절(CONFIG.bgVeil): 관악기·하프 0.22 그대로, 꽃밭인 드럼 행만 0.40 — 씨앗이 꽃밭에 묻히지 않게 (요청목록 2번)
+  v1.0.3 — 픽셀 그림(나비·꽃·이슬·씨앗)을 '한 점 = 1px'로 줄여 두고 부드럽게 확대 없이 그림, 나비 크기 1.25→1.55배(CONFIG.butterflyScale) (요청목록 1·4번)
 -->
 <html lang="ko">
 <head>
@@ -61,7 +62,7 @@
    CONFIG — 실제 하드웨어로 해 본 뒤 바꿀 숫자는 여기만 고치면 된다
    ========================================================================== */
 const CONFIG = {
-  version: 'v1.0.2',
+  version: 'v1.0.3',
   // 판정 창(ms). 키보드 모드 판정과, 시리얼 줄에 등급 칸이 없을 때의 분류에 쓴다. 템포와 무관하게 ms 고정.
   judgeMs: { default: { P: 50, G: 120, B: 250 }, W: { P: 100, G: 200, B: 400 } },
   score: { P: 100, G: 70, B: 30, M: 0 },          // 음 틀림은 Bad 점수
@@ -81,7 +82,11 @@ const CONFIG = {
   rowColors: { W: '#f7a8c4', H: '#c9b6f2', D: '#ffffff' },     // 행별 꽃 색 (분홍, 연보라, 흰색)
   instColors: { W: '#3f6fc8', H: '#c98a00', D: '#c2456b' },
   assetDir: 'assets/',
-  bgVeil: { W: 0.22, H: 0.22, D: 0.40 },              // 배경 그림 위 흰 막 투명도(행별). 노트가 배경에 묻히면 올린다
+  bgVeil: { W: 0.22, H: 0.22, D: 0.40 },          // 배경 그림 위 흰 막 투명도(행별). 노트가 배경에 묻히면 올린다
+  // 픽셀 그림: 원본에서 '픽셀 한 점'이 몇 px인지. 이 값으로 그림을 한 점 = 1px로 줄여 두고, 화면에는 부드럽게 확대 없이 키워 그린다.
+  // 그림을 새로 바꾸면 그림 창이 알려 주는 '픽셀 한 점' 값으로 고친다. 목록에 없는 그림은 원본 그대로 그린다.
+  spriteDotPx: { butterfly_mi: 11, flower_full: 17, dewdrop: 26, seed_kick: 29, seed_snare: 25 },
+  butterflyScale: 1.55,                            // 나비 표시 크기 = size × 이 값 (v1.0은 1.25)
 };
 
 /* ============================================================================
@@ -537,11 +542,36 @@ function loadAssets() {
     }
   }
 }
-function tinted(key, color) {                         // 흰 꽃 그림에 행별 색을 입힌다
+const PIX = {};
+function pixelSprite(key) {                           // v1.0.3: 픽셀 그림을 '한 점 = 1px' 작은 그림으로 줄여 둔다(점 한가운데 색을 집음)
   const im = IMG[key]; if (!im) return null;
+  if (PIX[key]) return PIX[key];
+  const dot = CONFIG.spriteDotPx[key]; if (!dot) return (PIX[key] = im);
+  try {
+    const w = im.naturalWidth, h = im.naturalHeight, n = Math.max(1, Math.round(w / dot)), m = Math.max(1, Math.round(h / dot));
+    const src = document.createElement('canvas'); src.width = w; src.height = h;
+    const sx = src.getContext('2d'); sx.drawImage(im, 0, 0);
+    const d = sx.getImageData(0, 0, w, h).data;
+    const c = document.createElement('canvas'); c.width = n; c.height = m;
+    const cx = c.getContext('2d'), out = cx.createImageData(n, m);
+    for (let j = 0; j < m; j++) for (let i = 0; i < n; i++) {
+      const x = Math.min(w - 1, Math.floor((i + 0.5) * w / n)), y = Math.min(h - 1, Math.floor((j + 0.5) * h / m));
+      const a = (y * w + x) * 4, b = (j * n + i) * 4;
+      out.data[b] = d[a]; out.data[b + 1] = d[a + 1]; out.data[b + 2] = d[a + 2]; out.data[b + 3] = d[a + 3];
+    }
+    cx.putImageData(out, 0, 0);
+    return (PIX[key] = c);
+  } catch (e) { return (PIX[key] = im); }           // 파일 더블클릭 등으로 픽셀을 못 읽으면 원본 그대로
+}
+function drawPixel(im, x, y, w, h) {                  // 부드럽게 확대 없이 그린다
+  const keep = ctx.imageSmoothingEnabled; ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(im, x, y, w, h); ctx.imageSmoothingEnabled = keep;
+}
+function tinted(key, color) {                         // 흰 꽃 그림에 행별 색을 입힌다
+  const im = pixelSprite(key); if (!im) return null;
   if (color === '#ffffff') return im;
   const id = key + color; if (TINT[id]) return TINT[id];
-  const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
+  const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
   const x = c.getContext('2d');
   x.drawImage(im, 0, 0); x.globalCompositeOperation = 'multiply'; x.fillStyle = color; x.fillRect(0, 0, c.width, c.height);
   x.globalCompositeOperation = 'destination-in'; x.drawImage(im, 0, 0);
@@ -550,11 +580,11 @@ function tinted(key, color) {                         // 흰 꽃 그림에 행�
 const HUE = { DO: 0, RE: 25, MI: 50, FA: 160, SOL: 215 };
 function butterflyImage(pitch) {                      // 색별 그림이 없고 한 장만 있으면 색조를 돌려 쓴다
   if (pitch === 'GREY') { if (IMG.butterfly_grey) return IMG.butterfly_grey; }
-  else if (IMG['butterfly_' + pitch.toLowerCase()]) return IMG['butterfly_' + pitch.toLowerCase()];
+  else if (IMG['butterfly_' + pitch.toLowerCase()]) return pixelSprite('butterfly_' + pitch.toLowerCase());
   const baseKey = Object.keys(HUE).find(p => IMG['butterfly_' + p.toLowerCase()]); if (!baseKey) return null;
   const id = 'bf' + baseKey + pitch; if (TINT[id]) return TINT[id];
-  const im = IMG['butterfly_' + baseKey.toLowerCase()];
-  const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
+  const im = pixelSprite('butterfly_' + baseKey.toLowerCase());
+  const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
   const x = c.getContext('2d');
   x.filter = pitch === 'GREY' ? 'grayscale(1) opacity(.8)' : 'hue-rotate(' + (HUE[pitch] - HUE[baseKey]) + 'deg)';
   x.drawImage(im, 0, 0);
@@ -614,7 +644,7 @@ function drawButterfly(cx, cy, size, pitch, o) {
   const flap = o.flap == null ? 1 : o.flap;
   ctx.save(); ctx.translate(cx, cy); if (o.rot) ctx.rotate(o.rot); if (o.alpha != null) ctx.globalAlpha = o.alpha;
   const im = butterflyImage(pitch);
-  if (im) { const s = size * 1.25; ctx.scale(0.75 + 0.25 * flap, 1); ctx.drawImage(im, -s / 2, -s / 2, s, s); }
+  if (im) { const s = size * CONFIG.butterflyScale; ctx.scale(0.75 + 0.25 * flap, 1); drawPixel(im, -s / 2, -s / 2, s, s); }
   else {
     const c = BF_COL[pitch] || BF_COL.GREY, k = size / 44;
     ctx.scale(k * (0.7 + 0.3 * flap), k); ctx.translate(-22, -18);
@@ -633,7 +663,7 @@ function drawFlower(cx, cy, size, color, stage, pop) {
   }
   if (im) {
     if (dim) { ctx.save(); ctx.filter = 'grayscale(.8) brightness(.9)'; }
-    ctx.drawImage(im, cx - s * 0.6 * k, cy - s * 0.6 * k, s * 1.2 * k, s * 1.2 * k);
+    drawPixel(im, cx - s * 0.6 * k, cy - s * 0.6 * k, s * 1.2 * k, s * 1.2 * k);
     if (dim) ctx.restore();
     return;
   }
@@ -652,7 +682,7 @@ function drawFlower(cx, cy, size, color, stage, pop) {
   ctx.restore();
 }
 function drawDew(cx, cy, r, grey) {
-  if (IMG.dewdrop && !grey) { ctx.drawImage(IMG.dewdrop, cx - r * 1.5, cy - r * 1.5, r * 3, r * 3); return; }
+  if (IMG.dewdrop && !grey) { drawPixel(pixelSprite('dewdrop'), cx - r * 1.5, cy - r * 1.5, r * 3, r * 3); return; }
   ctx.save();
   ctx.fillStyle = grey ? 'rgba(154,152,163,.25)' : 'rgba(255,215,94,.35)'; ctx.beginPath(); ctx.arc(cx, cy, r + 6, 0, Math.PI * 2); ctx.fill();
   const g = ctx.createRadialGradient(cx - r * .3, cy - r * .4, 1, cx, cy, r);
@@ -663,7 +693,7 @@ function drawDew(cx, cy, r, grey) {
 }
 function drawSeed(cx, cy, kind, grey) {
   const key = kind === 'KICK' ? 'seed_kick' : 'seed_snare';
-  if (IMG[key] && !grey) { const s = kind === 'KICK' ? 52 : 42; ctx.drawImage(IMG[key], cx - s / 2, cy - s / 2, s, s); return; }
+  if (IMG[key] && !grey) { const s = kind === 'KICK' ? 52 : 42; drawPixel(pixelSprite(key), cx - s / 2, cy - s / 2, s, s); return; }
   ctx.save();
   if (kind === 'KICK') {
     const g = ctx.createRadialGradient(cx - 7, cy - 8, 2, cx, cy, 21);
