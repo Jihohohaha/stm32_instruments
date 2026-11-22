@@ -4,6 +4,7 @@
   버전 기록
   v1.0 — 나비야 정원 원샷 빌드
   v1.0.1 — 배경 그림을 세 조각으로 자르지 않고 노트 영역(x 240~1440, y 100~746)에 한 장으로 그림, 행 사이 틈은 얇은 반투명 선 (요청목록 8번)
+  v1.0.2 — 배경 위 흰 막을 행별로 조절(CONFIG.bgVeil): 관악기·하프 0.22 그대로, 꽃밭인 드럼 행만 0.40 — 씨앗이 꽃밭에 묻히지 않게 (요청목록 2번)
 -->
 <html lang="ko">
 <head>
@@ -60,7 +61,7 @@
    CONFIG — 실제 하드웨어로 해 본 뒤 바꿀 숫자는 여기만 고치면 된다
    ========================================================================== */
 const CONFIG = {
-  version: 'v1.0.1',
+  version: 'v1.0.2',
   // 판정 창(ms). 키보드 모드 판정과, 시리얼 줄에 등급 칸이 없을 때의 분류에 쓴다. 템포와 무관하게 ms 고정.
   judgeMs: { default: { P: 50, G: 120, B: 250 }, W: { P: 100, G: 200, B: 400 } },
   score: { P: 100, G: 70, B: 30, M: 0 },          // 음 틀림은 Bad 점수
@@ -80,6 +81,7 @@ const CONFIG = {
   rowColors: { W: '#f7a8c4', H: '#c9b6f2', D: '#ffffff' },     // 행별 꽃 색 (분홍, 연보라, 흰색)
   instColors: { W: '#3f6fc8', H: '#c98a00', D: '#c2456b' },
   assetDir: 'assets/',
+  bgVeil: { W: 0.22, H: 0.22, D: 0.40 },              // 배경 그림 위 흰 막 투명도(행별). 노트가 배경에 묻히면 올린다
 };
 
 /* ============================================================================
@@ -782,7 +784,12 @@ function drawPlay(t) {
   if (IMG.bg_play) {                              // v1.0.1: 한 장 풍경을 노트 영역(x 240~1440, y 100~746)에 한 번에
     const im = IMG.bg_play, top = ROW_Y.W, bh = ROW_Y.D + ROW_H - ROW_Y.W;
     cover(im, LANE_X, top, W - LANE_X, bh, im.naturalWidth, im.naturalHeight);
-    ctx.fillStyle = 'rgba(255,250,240,.22)'; ctx.fillRect(LANE_X, top, W - LANE_X, bh);
+    const v = CONFIG.bgVeil, base = Math.min(v.W, v.H, v.D);   // v1.0.2: 행마다 흰 막 (꽃밭인 드럼 행은 진하게)
+    ctx.fillStyle = 'rgba(255,250,240,' + base + ')'; ctx.fillRect(LANE_X, top, W - LANE_X, bh);   // 행 사이 틈까지 한 번에
+    INSTS.forEach(inst => {                       // 더 진한 행만 덧칠: 합쳐서 v[inst]가 되게
+      const extra = 1 - (1 - v[inst]) / (1 - base);
+      if (extra > 0.001) { ctx.fillStyle = 'rgba(255,250,240,' + extra.toFixed(3) + ')'; ctx.fillRect(LANE_X, ROW_Y[inst], W - LANE_X, ROW_H); }
+    });
     ctx.fillStyle = 'rgba(255,250,240,.55)';      // 행 사이 틈 대신 얇은 반투명 선
     ctx.fillRect(LANE_X, ROW_Y.W + ROW_H + 3, W - LANE_X, 2);
     ctx.fillRect(LANE_X, ROW_Y.H + ROW_H + 3, W - LANE_X, 2);
