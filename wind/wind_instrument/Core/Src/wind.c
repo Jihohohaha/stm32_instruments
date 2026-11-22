@@ -4,6 +4,7 @@
  */
 #include "main.h"
 #include "wind.h"
+#include "ensemble_link.h"   /* [합주] B1 DMA 전환·박자 펄스·게임 줄·I2C (설정: Core/Inc/ensemble_link_cfg.h) */
 #include <stdio.h>
 #include <stdint.h>
 
@@ -15,7 +16,7 @@
 #define CAL_HALVES      250                   /* 시작 보정 시간: 250 x 8ms = 2초 */
 
 enum { DIR_CENTER, DIR_UP, DIR_RIGHT, DIR_DOWN, DIR_LEFT };
-static const char *const dir_name[5]  = { "CENTER", "UP", "RIGHT", "DOWN", "LEFT" };
+__attribute__((unused)) static const char *const dir_name[5]  = { "CENTER", "UP", "RIGHT", "DOWN", "LEFT" };   /* 상태 줄(WIND_LOG_STATUS)에서만 씀 */
 static const char *const note_name[5] = { "DO", "RE", "MI", "FA", "SOL" };
 static const uint8_t dir_note[5] = DIR_NOTE_MAP;
 
@@ -50,6 +51,10 @@ static volatile uint16_t cal_count;
 static volatile uint32_t cal_amp_sum, cal_x_sum, cal_y_sum;
 
 static uint16_t cur_period;
+
+/* [합주] 게임 줄용: 지금 보낸 음(켜짐 상태), 바뀌려는 음이 몇 반 버퍼(8ms) 동안 유지됐나 */
+static uint8_t ev_on, ev_note, pend_note, pend_cnt;
+#define NOTE_CHANGE_HALVES 3      /* 부는 중 음이 바뀌면 24ms 유지돼야 OFF+ON (조이스틱 흔들림 무시) */
 
 /* ===================================================================
  *  printf -> USART2 (CubeIDE 기본 syscalls.c 의 _write 가 이 함수를 부름)
@@ -147,12 +152,33 @@ static void process_half(const volatile uint16_t *p)
 
     uint16_t period = note_period[cur_note];
     if (octave_up) period /= 2;
+
+    /* [합주] 게임 줄: 불기 시작 → ON, 멈춤 → OFF, 부는 중 음이 바뀌어 유지되면 OFF(이전) + ON(새) */
+    if (sound_on && !ev_on) {
+        ev_on = 1; ev_note = cur_note; pend_cnt = 0;
+        link_note_on(note_name[cur_note], (uint8_t)target);
+    } else if (!sound_on && ev_on) {
+        ev_on = 0; pend_cnt = 0;
+        link_note_off(note_name[ev_note]);
+    } else if (sound_on && cur_note != ev_note) {
+        if (pend_cnt && cur_note == pend_note) {
+            if (++pend_cnt >= NOTE_CHANGE_HALVES) {
+                link_note_off(note_name[ev_note]);
+                ev_note = cur_note; pend_cnt = 0;
+                link_note_on(note_name[cur_note], (uint8_t)target);
+            }
+        } else { pend_note = cur_note; pend_cnt = 1; }
+    } else {
+        pend_cnt = 0;
+    }
+
     sound_update(period, volume);
 }
 
 /* DMA1 채널1 (ADC) : 반 찼을 때 / 다 찼을 때 */
 void DMA1_Channel1_IRQHandler(void)
 {
+    link_busy_begin();                                   /* [합주] DMA ON: 센서 처리 시간을 #S cpu 에 넣음 */
     uint32_t isr = DMA1->ISR;
     if (isr & DMA_ISR_HTIF1) {
         DMA1->IFCR = DMA_IFCR_CHTIF1;
@@ -162,6 +188,79 @@ void DMA1_Channel1_IRQHandler(void)
         DMA1->IFCR = DMA_IFCR_CTCIF1;
         process_half(&adc_buf[HALF_FRAMES * ADC_CH]);    /* 뒤쪽 반 */
     }
+    link_busy_end();
+}
+
+/* ===================================================================
+ *  [합주] DMA OFF(폴링): DMA가 하던 "ADC 값 옮기기"만 CPU가 직접
+ *  같은 것: TIM3 8kHz 주기, 같은 adc_buf 자리, 같은 process_half()
+ *  다른 것: DMA1 채널1 대신 메인 루프가 TIM3 넘침 플래그를 보고 채널 0·1·4를 하나씩 SWSTART → EOC 기다림
+ *  소리(TIM4 + DMA1 채널7)는 두 모드 모두 그대로
+ * =================================================================== */
+static volatile uint8_t adc_polling;
+static uint32_t poll_frame, poll_base, poll_last_cyc;
+static const uint8_t adc_ch_list[ADC_CH] = { 0, 1, 4 };   /* 마이크, 조이X, 조이Y (SQR3 순서와 같게) */
+
+void link_on_mode_change(uint8_t on)     /* B1을 누르면 모듈이 부름 (곡 도중에는 안 부름) */
+{
+    uint32_t pm = __get_PRIMASK();
+    __disable_irq();
+    if (on) {
+        adc_polling = 0;
+        ADC1->CR2 &= ~ADC_CR2_EXTTRIG;
+        DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+        DMA1->IFCR = DMA_IFCR_CGIF1;
+        DMA1_Channel1->CNDTR = FRAMES * ADC_CH;                  /* 버퍼 처음부터 */
+        ADC1->CR1  = ADC_CR1_SCAN;
+        ADC1->SQR1 = (ADC_CH - 1) << ADC_SQR1_L_Pos;
+        ADC1->SQR3 = (0u << 0) | (1u << 5) | (4u << 10);
+        ADC1->CR2  = ADC_CR2_ADON | ADC_CR2_DMA | ADC_CR2_EXTSEL_2;   /* TIM3 TRGO */
+        NVIC_ClearPendingIRQ(DMA1_Channel1_IRQn);
+        DMA1_Channel1->CCR |= DMA_CCR_EN;
+        ADC1->CR2 |= ADC_CR2_EXTTRIG;
+    } else {
+        ADC1->CR2 &= ~ADC_CR2_EXTTRIG;                           /* TIM3이 ADC를 깨우지 않게 */
+        DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+        DMA1->IFCR = DMA_IFCR_CGIF1;
+        NVIC_ClearPendingIRQ(DMA1_Channel1_IRQn);
+        ADC1->CR1  = 0;                                          /* scan 끔: 한 채널씩 */
+        ADC1->SQR1 = 0;
+        ADC1->CR2  = ADC_CR2_ADON | ADC_CR2_EXTSEL;              /* EXTSEL=111: SWSTART */
+        ADC1->CR2 |= ADC_CR2_EXTTRIG;
+        (void)ADC1->DR;
+        TIM3->SR = ~TIM_SR_UIF;
+        poll_frame = 0; poll_base = 0; poll_last_cyc = DWT->CYCCNT;
+        adc_polling = 1;
+    }
+    __set_PRIMASK(pm);
+}
+
+static uint16_t adc_poll_one(uint32_t channel)
+{
+    ADC1->SQR3 = channel;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while (!(ADC1->SR & ADC_SR_EOC)) { }
+    return (uint16_t)ADC1->DR;
+}
+
+static void adc_poll_service(void)       /* DMA OFF일 때 메인 루프에서 계속 부름 */
+{
+    if (!(TIM3->SR & TIM_SR_UIF)) return;
+    TIM3->SR = ~TIM_SR_UIF;
+    const uint32_t period = SystemCoreClock / 8000u;             /* 8kHz 한 칸 = 8000사이클(64MHz) */
+    const uint32_t now = DWT->CYCCNT;
+    const uint32_t gap = now - poll_last_cyc;
+    poll_last_cyc = now;
+    if (gap > period + period / 2) link_miss_add(gap / period - 1);   /* 늦게 와서 놓친 프레임 */
+    link_busy_begin();
+    for (int c = 0; c < ADC_CH; c++)
+        adc_buf[poll_base + poll_frame * ADC_CH + c] = adc_poll_one(adc_ch_list[c]);
+    if (++poll_frame == HALF_FRAMES) {                           /* 반 버퍼가 차면 DMA 때와 같은 처리 */
+        process_half(&adc_buf[poll_base]);
+        poll_frame = 0;
+        poll_base = poll_base == 0 ? HALF_FRAMES * ADC_CH : 0;
+    }
+    link_busy_end();
 }
 
 /* ===================================================================
@@ -275,17 +374,21 @@ void wind_init(void)
     clock_enable();
     gpio_init();
     usart2_init();
-    printf("\r\n=== wind instrument start ===\r\n");
-    printf("calibrating 2s: don't blow, don't touch joystick\r\n");
+    printf("\r\n#=== wind instrument start ===\r\n");
+    printf("#calibrating 2s: don't blow, don't touch joystick\r\n");
     sound_init();
     adc_dma_init();
+    link_init();                         /* [합주] 박자 입력 PB5, B1, I2C, MODE 줄 */
 }
 
-/* 0.1초마다 상태 출력 */
+/* 메인 루프: [합주] 줄 보내기·B1·#S, DMA OFF면 폴링, (선택) 0.1초 상태 줄 */
 void wind_loop(void)
 {
     static uint32_t last;
     static uint8_t cal_printed;
+
+    link_loop();
+    if (adc_polling) adc_poll_service();
 
     if (HAL_GetTick() - last < 100) return;
     last = HAL_GetTick();
@@ -293,12 +396,14 @@ void wind_loop(void)
     if (cal_count < CAL_HALVES) return;
     if (!cal_printed) {
         cal_printed = 1;
-        printf("cal done: noise=%u  joy center x=%u y=%u\r\n",
+        printf("#cal done: noise=%u  joy center x=%u y=%u\r\n",
                noise_floor, joy_cx, joy_cy);
     }
-    printf("amp=%4u (on>%4u) vol=%3ld | x=%4u y=%4u sw=%u | %-6s -> %s %s\r\n",
+#if WIND_LOG_STATUS
+    printf("#amp=%4u (on>%4u) vol=%3ld | x=%4u y=%4u sw=%u | %-6s -> %s %s\r\n",
            breath_amp, noise_floor + BREATH_ON, (long)volume,
            joy_x, joy_y, octave_up,
            dir_name[cur_dir], note_name[cur_note],
            sound_on ? "ON" : "off");
+#endif
 }

@@ -26,6 +26,12 @@
  * 상자에 붙인 방향이 달라 위/아래가 뒤집히면 여기 숫자만 바꾸기 */
 #define DIR_NOTE_MAP    { 0, 1, 2, 3, 4 }
 
+/* [합주] 0.1초 상태 줄(amp=.. vol=..). 혼자 조정할 때만 1. 합주·DMA 비교 때는 0
+ * (폴링 모드에서 줄을 찍는 동안 샘플을 놓쳐 비교가 흐려짐. 1로 둘 거면 두 모드 같은 값으로) */
+#ifndef WIND_LOG_STATUS
+#define WIND_LOG_STATUS 0
+#endif
+
 void wind_init(void);   /* main.c USER CODE 2 에서 한 번 호출 */
 void wind_loop(void);   /* main.c while(1) 안에서 계속 호출 */
 
