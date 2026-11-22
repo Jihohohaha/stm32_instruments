@@ -3,6 +3,7 @@
   나비야 정원 — 센서 악기 합주 리듬 확인 화면
   버전 기록
   v1.0 — 나비야 정원 원샷 빌드
+  v1.0.1 — 배경 그림을 세 조각으로 자르지 않고 노트 영역(x 240~1440, y 100~746)에 한 장으로 그림, 행 사이 틈은 얇은 반투명 선 (요청목록 8번)
 -->
 <html lang="ko">
 <head>
@@ -59,7 +60,7 @@
    CONFIG — 실제 하드웨어로 해 본 뒤 바꿀 숫자는 여기만 고치면 된다
    ========================================================================== */
 const CONFIG = {
-  version: 'v1.0',
+  version: 'v1.0.1',
   // 판정 창(ms). 키보드 모드 판정과, 시리얼 줄에 등급 칸이 없을 때의 분류에 쓴다. 템포와 무관하게 ms 고정.
   judgeMs: { default: { P: 50, G: 120, B: 250 }, W: { P: 100, G: 200, B: 400 } },
   score: { P: 100, G: 70, B: 30, M: 0 },          // 음 틀림은 Bad 점수
@@ -778,12 +779,18 @@ function drawPlay(t) {
 
   // 행 배경
   const bands = { W: ['#cfe8f6', '#eaf5fb'], H: ['#fff6dc', '#fdebb9'], D: ['#dcefc9', '#a9d48c'] };
+  if (IMG.bg_play) {                              // v1.0.1: 한 장 풍경을 노트 영역(x 240~1440, y 100~746)에 한 번에
+    const im = IMG.bg_play, top = ROW_Y.W, bh = ROW_Y.D + ROW_H - ROW_Y.W;
+    cover(im, LANE_X, top, W - LANE_X, bh, im.naturalWidth, im.naturalHeight);
+    ctx.fillStyle = 'rgba(255,250,240,.22)'; ctx.fillRect(LANE_X, top, W - LANE_X, bh);
+    ctx.fillStyle = 'rgba(255,250,240,.55)';      // 행 사이 틈 대신 얇은 반투명 선
+    ctx.fillRect(LANE_X, ROW_Y.W + ROW_H + 3, W - LANE_X, 2);
+    ctx.fillRect(LANE_X, ROW_Y.H + ROW_H + 3, W - LANE_X, 2);
+  }
   INSTS.forEach((inst, i) => {
     const y = ROW_Y[inst];
     if (IMG.bg_play) {
-      const im = IMG.bg_play, bh = im.naturalHeight / 3;
-      ctx.drawImage(im, 0, i * bh, im.naturalWidth, bh, 0, y, W, ROW_H);
-      ctx.fillStyle = 'rgba(255,250,240,.22)'; ctx.fillRect(0, y, W, ROW_H);
+      // 배경은 위에서 한 번에 그렸다
     } else {
       const g = ctx.createLinearGradient(0, y, 0, y + ROW_H); g.addColorStop(0, bands[inst][0]); g.addColorStop(1, bands[inst][1]);
       ctx.fillStyle = g; ctx.fillRect(0, y, W, ROW_H);
