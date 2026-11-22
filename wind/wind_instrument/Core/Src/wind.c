@@ -53,8 +53,12 @@ static volatile uint32_t cal_amp_sum, cal_x_sum, cal_y_sum;
 static uint16_t cur_period;
 
 /* [합주] 게임 줄용: 지금 보낸 음(켜짐 상태), 바뀌려는 음이 몇 반 버퍼(8ms) 동안 유지됐나 */
-static uint8_t ev_on, ev_note, pend_note, pend_cnt;
+static uint8_t ev_on, ev_note, pend_note, pend_cnt, off_cnt;
 #define NOTE_CHANGE_HALVES 3      /* 부는 중 음이 바뀌면 24ms 유지돼야 OFF+ON (조이스틱 흔들림 무시) */
+#ifndef WIND_OFF_HOLD_HALVES
+#define WIND_OFF_HOLD_HALVES 5    /* 소리가 꺼져도 40ms(반 버퍼 5개) 계속 꺼져 있어야 OFF 줄. 그 안에 다시 켜지면 한 음으로 이어 붙임
+                                     (입김 끝 떨림으로 짧은 음이 여러 번 생기는 것 방지. 게임 줄만 해당, 스피커 소리는 그대로) */
+#endif
 
 /* ===================================================================
  *  printf -> USART2 (CubeIDE 기본 syscalls.c 의 _write 가 이 함수를 부름)
@@ -154,12 +158,15 @@ static void process_half(const volatile uint16_t *p)
     if (octave_up) period /= 2;
 
     /* [합주] 게임 줄: 불기 시작 → ON, 멈춤 → OFF, 부는 중 음이 바뀌어 유지되면 OFF(이전) + ON(새) */
+    if (sound_on) off_cnt = 0;
     if (sound_on && !ev_on) {
         ev_on = 1; ev_note = cur_note; pend_cnt = 0;
         link_note_on(note_name[cur_note], (uint8_t)target);
     } else if (!sound_on && ev_on) {
-        ev_on = 0; pend_cnt = 0;
-        link_note_off(note_name[ev_note]);
+        if (++off_cnt >= WIND_OFF_HOLD_HALVES) {      /* 40ms 동안 계속 꺼져 있을 때만 OFF */
+            ev_on = 0; pend_cnt = 0; off_cnt = 0;
+            link_note_off(note_name[ev_note]);
+        }
     } else if (sound_on && cur_note != ev_note) {
         if (pend_cnt && cur_note == pend_note) {
             if (++pend_cnt >= NOTE_CHANGE_HALVES) {
