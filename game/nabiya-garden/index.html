@@ -6,6 +6,7 @@
   v1.0.1 — 배경 그림을 세 조각으로 자르지 않고 노트 영역(x 240~1440, y 100~746)에 한 장으로 그림, 행 사이 틈은 얇은 반투명 선 (요청목록 8번)
   v1.0.2 — 배경 위 흰 막을 행별로 조절(CONFIG.bgVeil): 관악기·하프 0.22 그대로, 꽃밭인 드럼 행만 0.40 — 씨앗이 꽃밭에 묻히지 않게 (요청목록 2번)
   v1.0.3 — 픽셀 그림(나비·꽃·이슬·씨앗)을 '한 점 = 1px'로 줄여 두고 부드럽게 확대 없이 그림, 나비 크기 1.25→1.55배(CONFIG.butterflyScale) (요청목록 1·4번)
+  v1.0.4 — 꽃에 행별 색을 입힐 때 밝은 꽃잎에만 입힘, 노란 꽃술과 남색 외곽선은 그대로 (요청목록 5번)
 -->
 <html lang="ko">
 <head>
@@ -62,7 +63,7 @@
    CONFIG — 실제 하드웨어로 해 본 뒤 바꿀 숫자는 여기만 고치면 된다
    ========================================================================== */
 const CONFIG = {
-  version: 'v1.0.3',
+  version: 'v1.0.4',
   // 판정 창(ms). 키보드 모드 판정과, 시리얼 줄에 등급 칸이 없을 때의 분류에 쓴다. 템포와 무관하게 ms 고정.
   judgeMs: { default: { P: 50, G: 120, B: 250 }, W: { P: 100, G: 200, B: 400 } },
   score: { P: 100, G: 70, B: 30, M: 0 },          // 음 틀림은 Bad 점수
@@ -543,6 +544,21 @@ function loadAssets() {
   }
 }
 const PIX = {};
+function hexRgb(h) { h = h.replace('#', ''); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); }
+function rgbHsl(r, g, b) {                            // 0~255 → [색조 0~360, 채도 0~1, 밝기 0~1]
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  if (!d) return [0, 0, l];
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h *= 60; if (h < 0) h += 360;
+  return [h, s, l];
+}
+function hslRgb(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return [(r + m) * 255, (g + m) * 255, (b + m) * 255];
+}
 function pixelSprite(key) {                           // v1.0.3: 픽셀 그림을 '한 점 = 1px' 작은 그림으로 줄여 둔다(점 한가운데 색을 집음)
   const im = IMG[key]; if (!im) return null;
   if (PIX[key]) return PIX[key];
@@ -573,8 +589,21 @@ function tinted(key, color) {                         // 흰 꽃 그림에 행�
   const id = key + color; if (TINT[id]) return TINT[id];
   const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
   const x = c.getContext('2d');
-  x.drawImage(im, 0, 0); x.globalCompositeOperation = 'multiply'; x.fillStyle = color; x.fillRect(0, 0, c.width, c.height);
-  x.globalCompositeOperation = 'destination-in'; x.drawImage(im, 0, 0);
+  x.drawImage(im, 0, 0);
+  try {                                               // v1.0.4: 밝은 꽃잎(흰색·연한 푸른 음영)에만 색을 곱한다. 노란 꽃술과 남색 외곽선은 그대로
+    const d = x.getImageData(0, 0, c.width, c.height), t = hexRgb(color);
+    for (let i = 0; i < d.data.length; i += 4) {
+      if (d.data[i + 3] < 8) continue;
+      const [h, sat, l] = rgbHsl(d.data[i], d.data[i + 1], d.data[i + 2]);
+      const chroma = Math.max(d.data[i], d.data[i + 1], d.data[i + 2]) - Math.min(d.data[i], d.data[i + 1], d.data[i + 2]);
+      if (l < 0.75 || (h >= 25 && h <= 70 && chroma > 50)) continue;   // 어두운 외곽선, 노란 꽃술은 건너뜀
+      d.data[i] = d.data[i] * t[0] / 255; d.data[i + 1] = d.data[i + 1] * t[1] / 255; d.data[i + 2] = d.data[i + 2] * t[2] / 255;
+    }
+    x.putImageData(d, 0, 0);
+  } catch (e) {                                       // 픽셀을 못 읽으면 예전 방식(전체에 곱하기)
+    x.globalCompositeOperation = 'multiply'; x.fillStyle = color; x.fillRect(0, 0, c.width, c.height);
+    x.globalCompositeOperation = 'destination-in'; x.drawImage(im, 0, 0);
+  }
   return (TINT[id] = c);
 }
 const HUE = { DO: 0, RE: 25, MI: 50, FA: 160, SOL: 215 };
