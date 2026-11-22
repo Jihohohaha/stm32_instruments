@@ -19,3 +19,7 @@ game/nabiya-garden/assets/original/
 
 # 압축본
 *.zip
+
+# 시리얼 기록 (serial_monitor.py)
+logs/
+__pycache__/

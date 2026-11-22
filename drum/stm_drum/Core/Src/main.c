@@ -5,6 +5,7 @@
  */
 #include "stm32f103xb.h"
 #include "drum_samples.h"
+#include "ensemble_link.h"   /* [합주] B1 DMA 전환·박자 펄스·게임 줄 (설정: Core/Inc/ensemble_link_cfg.h) */
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -16,7 +17,8 @@
 #define KICK_RETRIGGER_MS       35U
 #define SNARE_RETRIGGER_MS      30U
 #define MASTER_VOLUME_PERCENT  40U
-#define SERIAL_DIAGNOSTICS       1U
+#define SERIAL_DIAGNOSTICS       1U  /* [합주] 진단 줄은 # 로 시작 → 게임이 무시 */
+#define DRUM_B1_TEST             0U  /* [합주] B1은 DMA ON/OFF 전환에 씀. 테스트음은 시리얼 T 키로 */
 #define BUTTON_AUDIO_TEST_ONLY   0U  /* Piezo pads enabled; B1 test remains available. */
 
 #define CORE_CLOCK_HZ      64000000U
@@ -84,6 +86,7 @@ static volatile uint32_t hit_write;
 static volatile uint32_t hit_read;
 static volatile uint32_t manual_hits;
 static volatile uint32_t milliseconds;
+uint32_t link_millis(void) { return milliseconds; }   /* [합주] 모듈 시계 = 이 코드의 SysTick */
 static volatile uint32_t led_until_ms;
 static volatile uint16_t adc_buffer[ADC_BUFFER_WORDS];
 static volatile uint16_t pwm_buffer[AUDIO_BUFFER_WORDS];
@@ -211,6 +214,10 @@ static void hit_push(uint8_t pad, uint16_t peak)
     hit_write = next;
     drum_last_hit_peak[pad] = peak;
     ++drum_hit_count[pad];
+    /* [합주] 게임 줄: 세기 0~100 = gain과 같은 비율. 2ms 피크 창 지연은 cfg의 LINK_LATENCY_MS로 뺌 */
+    link_note_on(pad == 0U ? "KICK" : "SNARE",
+                 (uint8_t)((limited - pads[pad].threshold) * 100U /
+                           (VELOCITY_FULL_SCALE - pads[pad].threshold)));
 }
 
 static void pad_update(uint8_t index, uint16_t value)
@@ -404,7 +411,7 @@ static void audio_dma_init(void)
     NVIC_EnableIRQ(DMA1_Channel7_IRQn);
 }
 
-void DMA1_Channel1_IRQHandler(void)
+static void adc_dma_isr_body(void)
 {
     const uint32_t started = DWT->CYCCNT;
     const uint32_t flags = DMA1->ISR;
@@ -425,6 +432,82 @@ void DMA1_Channel1_IRQHandler(void)
     if (elapsed >= CORE_CLOCK_HZ / ADC_FRAME_HZ * ADC_HALF_FRAMES) {
         latch_fault(FAULT_MISSED_ADC);
     }
+}
+
+void DMA1_Channel1_IRQHandler(void)   /* [합주] DMA ON: 센서 처리 시간을 #STAT cpu 에 넣음 */
+{
+    link_busy_begin();
+    adc_dma_isr_body();
+    link_busy_end();
+}
+
+/* ===== [합주] DMA OFF(폴링): DMA가 하던 "ADC 값 옮기기"만 CPU가 직접 =====
+ * 같은 것: TIM3 8kHz 주기, 같은 adc_buffer 자리, 같은 adc_process()(타격 판정)
+ * 다른 것: DMA1 채널1 대신, 메인 루프가 TIM3 넘침 플래그를 보고 채널 0·1을 하나씩 SWSTART → EOC 기다림
+ * 소리(TIM4 + DMA1 채널7)는 두 모드 모두 그대로 */
+static volatile uint8_t adc_polling;
+static uint32_t poll_frame, poll_base, poll_last_cyc;
+
+void link_on_mode_change(uint8_t on)   /* B1을 누르면 모듈이 부름 (곡 도중에는 안 부름) */
+{
+    const uint32_t previous = __get_PRIMASK();
+    __disable_irq();
+    if (on) {
+        adc_polling = 0U;
+        ADC1->CR2 &= ~ADC_CR2_EXTTRIG;
+        DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+        DMA1->IFCR = DMA_IFCR_CGIF1;
+        DMA1_Channel1->CNDTR = ADC_BUFFER_WORDS;      /* 버퍼 처음부터 */
+        ADC1->CR1 = ADC_CR1_SCAN;
+        ADC1->SQR1 = 1U << 20U;                       /* 두 채널 */
+        ADC1->SQR3 = 0U | (1U << 5U);                 /* PA0 then PA1 */
+        ADC1->CR2 = ADC_CR2_EXTSEL_2 | ADC_CR2_DMA | ADC_CR2_ADON;   /* TIM3 TRGO */
+        NVIC_ClearPendingIRQ(DMA1_Channel1_IRQn);
+        DMA1_Channel1->CCR |= DMA_CCR_EN;
+        ADC1->CR2 |= ADC_CR2_EXTTRIG;
+    } else {
+        ADC1->CR2 &= ~ADC_CR2_EXTTRIG;                /* TIM3이 ADC를 깨우지 않게 */
+        DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+        DMA1->IFCR = DMA_IFCR_CGIF1;
+        NVIC_ClearPendingIRQ(DMA1_Channel1_IRQn);
+        ADC1->CR1 = 0U;                               /* scan 끔: 한 채널씩 */
+        ADC1->SQR1 = 0U;
+        ADC1->CR2 = ADC_CR2_EXTSEL | ADC_CR2_ADON;    /* EXTSEL=111: SWSTART */
+        ADC1->CR2 |= ADC_CR2_EXTTRIG;
+        (void)ADC1->DR;
+        TIM3->SR = ~TIM_SR_UIF;
+        poll_frame = 0U; poll_base = 0U; poll_last_cyc = DWT->CYCCNT;
+        adc_polling = 1U;
+    }
+    __set_PRIMASK(previous);
+}
+
+static uint16_t adc_poll_one(uint32_t channel)
+{
+    ADC1->SQR3 = channel;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while ((ADC1->SR & ADC_SR_EOC) == 0U) { }
+    return (uint16_t)ADC1->DR;
+}
+
+static void adc_poll_service(void)    /* DMA OFF일 때 메인 루프에서 계속 부름 */
+{
+    if ((TIM3->SR & TIM_SR_UIF) == 0U) { return; }
+    TIM3->SR = ~TIM_SR_UIF;
+    const uint32_t period = CORE_CLOCK_HZ / ADC_FRAME_HZ;     /* 8000사이클 = 125us */
+    const uint32_t now = DWT->CYCCNT;
+    const uint32_t gap = now - poll_last_cyc;
+    poll_last_cyc = now;
+    if (gap > period + period / 2U) { link_miss_add(gap / period - 1U); }   /* 늦게 와서 놓친 프레임 */
+    link_busy_begin();
+    adc_buffer[poll_base + 2U * poll_frame + 0U] = adc_poll_one(0U);
+    adc_buffer[poll_base + 2U * poll_frame + 1U] = adc_poll_one(1U);
+    if (++poll_frame == ADC_HALF_FRAMES) {                   /* 반 버퍼가 차면 DMA 때와 같은 처리 */
+        adc_process(poll_base);
+        poll_frame = 0U;
+        poll_base = poll_base == 0U ? ADC_HALF_FRAMES * 2U : 0U;
+    }
+    link_busy_end();
 }
 
 void DMA1_Channel7_IRQHandler(void)
@@ -481,7 +564,7 @@ static void report_hit_events(void)
                                  VELOCITY_FULL_SCALE : peak[pad];
         const uint32_t gain = 64U + (limited - pads[pad].threshold) * 192U /
             (VELOCITY_FULL_SCALE - pads[pad].threshold);
-        uart_text(pad == 0U ? "HIT KICK N=" : "HIT SNARE N=");
+        uart_text(pad == 0U ? "#HIT KICK N=" : "#HIT SNARE N=");
         uart_number(count[pad]);
         uart_text(" DELTA="); uart_number(count[pad] - reported[pad]);
         uart_text(" PEAK="); uart_number(peak[pad]);
@@ -511,7 +594,7 @@ static void report_status(void)
     drum_pwm_min = 255U;
     drum_pwm_max = 0U;
     __set_PRIMASK(previous);
-    uart_text("ADC="); uart_number(latest[0]);
+    uart_text("#ADC="); uart_number(latest[0]);
     uart_text(","); uart_number(latest[1]);
     uart_text(" PEAK="); uart_number(peak[0]);
     uart_text(","); uart_number(peak[1]);
@@ -545,9 +628,10 @@ int main(void)
                     SysTick_CTRL_ENABLE_Msk;
     TIM4->CR1 |= TIM_CR1_CEN;
     TIM3->CR1 |= TIM_CR1_CEN;
+    link_init();                     /* [합주] 박자 입력 PB5(EXTI5), B1, MODE 줄 */
     __enable_irq();
-    uart_text("DRUM PIEZO ENABLED F103RB ADC1/DMA1_CH1 TIM4_UP/DMA1_CH7\r\n"
-              "B1 button or T: kick/snare/both test. K/S/B: manual hits.\r\n");
+    uart_text("#DRUM PIEZO ENABLED F103RB ADC1/DMA1_CH1 TIM4_UP/DMA1_CH7\r\n"
+              "#B1 = DMA ON/OFF. T: kick/snare/both test. K/S/B: manual hits.\r\n");
 
     uint32_t last_button_ms = milliseconds;
     uint32_t button_changed_ms = milliseconds;
@@ -558,7 +642,7 @@ int main(void)
     bool button_stable = false;
     for (;;) {
         const uint32_t now = milliseconds;
-        if (now != last_button_ms) {
+        if (DRUM_B1_TEST != 0U && now != last_button_ms) {
             last_button_ms = now;
             const bool pressed = (GPIOC->IDR & (1U << 13U)) == 0U;
             if (pressed != button_raw) {
@@ -573,7 +657,7 @@ int main(void)
                     ++drum_test_count;
                     demo_stage = 1U;
                     next_demo_ms = now;
-                    uart_text("B1 PRESS: start drum test\r\n");
+                    uart_text("#B1 PRESS: start drum test\r\n");
                 }
             }
         }
@@ -586,20 +670,20 @@ int main(void)
             case 'T': case 't':
                 ++drum_test_count;
                 demo_stage = 1U; next_demo_ms = now;
-                uart_text("UART T: start drum test\r\n");
+                uart_text("#UART T: start drum test\r\n");
                 break;
             default: break;
             }
         }
         if (demo_stage != 0U && (int32_t)(now - next_demo_ms) >= 0) {
-            uart_text(demo_stage == 1U ? "TEST KICK\r\n" :
-                      demo_stage == 2U ? "TEST SNARE\r\n" : "TEST BOTH\r\n");
+            uart_text(demo_stage == 1U ? "#TEST KICK\r\n" :
+                      demo_stage == 2U ? "#TEST SNARE\r\n" : "#TEST BOTH\r\n");
             request_manual_hits(demo_stage); /* 1=kick, 2=snare, 3=both. */
             demo_stage = demo_stage == 3U ? 0U : (uint8_t)(demo_stage + 1U);
             next_demo_ms = now + 700U;
         }
         const bool led_on = drum_fault != 0U ? (now / 150U) % 2U != 0U :
-                            (int32_t)(now - led_until_ms) < 0;
+                            link_dma_on() == 0U;   /* [합주] LD2 켜짐 = DMA OFF (원래: 칠 때 0.25초) */
         GPIOA->BSRR = led_on ? 1U << 5U : 1U << 21U;
         if (SERIAL_DIAGNOSTICS != 0U) { report_hit_events(); }
         if (SERIAL_DIAGNOSTICS != 0U &&
@@ -607,6 +691,11 @@ int main(void)
             last_report_ms = now;
             report_status();
         }
-        __WFI();
+        link_loop();                     /* [합주] 게임 줄 보내기, B1, #STAT */
+        if (adc_polling != 0U) {
+            adc_poll_service();          /* [합주] DMA OFF: CPU가 ADC를 직접 */
+        } else {
+            __WFI();
+        }
     }
 }

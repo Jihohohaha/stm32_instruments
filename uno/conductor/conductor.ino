@@ -1,5 +1,12 @@
 /*
- * conductor.ino — Uno 지휘자 v0 (센서 악기 합주)
+ * conductor.ino — Uno 지휘자 v1 (센서 악기 합주)  — v0 + I2C로 세 보드 줄 받기 + 간단 채점
+ *
+ * v1에서 바뀐 것 (11/22, USB 허브 없이 Uno 하나만 노트북에 꽂는 구조)
+ *   - Uno = I2C 슬레이브 0x08. 세 STM32가 I2C 마스터로 게임 줄(W,ON,MI,72,21,+12 등)을 보낸다
+ *   - 받은 줄을 그대로 USB 시리얼로 넘긴다 → 게임은 Uno 포트 하나만 연다
+ *   - 곡이 끝나면 악기별로 받은 줄을 세어 #EVAL 줄로 낸다 (Uno가 연주를 평가)
+ *   - 배선: A4(SDA)·A5(SCL) ↔ 세 보드 D14(PB9)·D15(PB8), 4.7kΩ 풀업 두 개를 5V로, GND 공통
+ *   - 박자 펄스(D8)·START·COUNT·BEAT·END는 v0 그대로
  *
  * 하는 일
  *   - 박자 펄스: D8에서 박마다 10ms HIGH. 관악기·하프·드럼 STM32가 EXTI(올라가는 순간)로 받는다.
@@ -29,7 +36,10 @@
  * 시리얼 형식은 docs/serial-protocol.md. '#'으로 시작하는 줄은 사람이 읽는 메모(게임은 무시).
  */
 
+#include <Wire.h>
+
 /* ===== 바꿀 수 있는 값 ===== */
+const uint8_t  I2C_ADDR       = 0x08;  // STM32 쪽 LINK_I2C_ADDR와 같게
 const uint8_t  PIN_BEAT       = 8;     // 박자 펄스 출력
 const uint8_t  PIN_LED        = 13;    // 보드 LED: 박마다 깜빡
 const uint8_t  PIN_START_BTN  = 2;     // 시작 버튼 (GND로 누름)
@@ -61,10 +71,100 @@ bool     everPulsed = false;
 uint32_t lastPulseMs;
 
 char     lineBuf[24];
+uint32_t endedMs = 0;
+bool     evalPending = false;
 uint8_t  lineLen = 0;
 bool     autoStarted = false;
 bool     btnPrev = true;
 uint32_t btnChangeMs = 0;
+
+/* ===== I2C로 받은 줄 (수신 인터럽트 → 고리 버퍼 → loop에서 USB로) ===== */
+const uint8_t  RX_LINES = 12;
+const uint8_t  RX_LEN   = 32;          // Wire 버퍼와 같은 크기
+volatile char    rxBuf[RX_LINES][RX_LEN + 1];
+volatile uint8_t rxLen[RX_LINES];
+volatile uint8_t rxHead = 0, rxTail = 0;   // head = 넣을 칸, tail = 꺼낼 칸
+volatile uint16_t rxDrop = 0;
+
+void onI2cReceive(int n)               // TWI 인터럽트 안: 복사만 하고 바로 끝
+{
+  uint8_t next = (rxHead + 1) % RX_LINES;
+  if (next == rxTail) { rxDrop++; while (Wire.available()) Wire.read(); return; }
+  uint8_t k = 0;
+  while (Wire.available()) {
+    char c = (char)Wire.read();
+    if (k < RX_LEN && c != '\r' && c != '\n') rxBuf[rxHead][k++] = c;
+  }
+  if (k == 0) return;
+  rxBuf[rxHead][k] = '\0';
+  rxLen[rxHead] = k;
+  rxHead = next;
+  (void)n;
+}
+
+/* ===== Uno 채점: 악기별로 박마다 첫 ON 줄만 세서 P/G/B, 안 온 박은 M (채보 노트 수 기준 근사) ===== */
+const uint8_t  N_INST = 3;
+const char     INST_CH[N_INST]    = {'W', 'H', 'D'};
+const uint8_t  CHART_NOTES[N_INST] = {54, 32, 63};          // 나비야 채보 (게임과 같음)
+const int16_t  WIN_P[N_INST] = {100, 50, 50}, WIN_G[N_INST] = {200, 120, 120}, WIN_B[N_INST] = {400, 250, 250};
+uint16_t evalP[N_INST], evalG[N_INST], evalB[N_INST], evalX[N_INST];
+uint32_t seenLo[N_INST], seenHi[N_INST];                    // 0~63번 박 중 이미 센 박
+char     modeLabel[8] = "?";
+
+void evalReset()
+{
+  for (uint8_t i = 0; i < N_INST; i++) { evalP[i] = evalG[i] = evalB[i] = evalX[i] = 0; seenLo[i] = seenHi[i] = 0; }
+}
+
+void evalLine(const char *s, uint8_t len)
+{
+  if (len >= 8 && !strncmp(s, "MODE,DMA_", 9)) { strncpy(modeLabel, s + 9, sizeof(modeLabel) - 1); modeLabel[sizeof(modeLabel) - 1] = 0; return; }
+  int8_t inst = -1;
+  for (uint8_t i = 0; i < N_INST; i++) if (s[0] == INST_CH[i]) inst = i;
+  if (inst < 0 || len < 12 || strncmp(s + 1, ",ON,", 4) != 0) return;
+  // 악기,ON,음,세기,박,오차[,등급] → 쉼표 위치로 박과 오차 꺼내기
+  const char *f[7]; uint8_t nf = 0; f[nf++] = s;
+  for (uint8_t i = 0; i < len && nf < 7; i++) if (s[i] == ',') f[nf++] = s + i + 1;
+  if (nf < 6) return;
+  int beat = atoi(f[4]);
+  int off  = atoi(f[5][0] == '+' ? f[5] + 1 : f[5]);
+  if (beat < 0 || beat > 63) return;
+  uint32_t bit = 1UL << (beat & 31);
+  uint32_t *seen = beat < 32 ? &seenLo[inst] : &seenHi[inst];
+  int a = off < 0 ? -off : off;
+  if ((*seen & bit) || a > WIN_B[inst]) { evalX[inst]++; return; }   // 같은 박 두 번째·너무 멂 = 헛음
+  *seen |= bit;
+  if (a <= WIN_P[inst]) evalP[inst]++; else if (a <= WIN_G[inst]) evalG[inst]++; else evalB[inst]++;
+}
+
+void evalPrint()
+{
+  for (uint8_t i = 0; i < N_INST; i++) {
+    uint16_t hit = evalP[i] + evalG[i] + evalB[i];
+    uint16_t miss = CHART_NOTES[i] > hit ? CHART_NOTES[i] - hit : 0;
+    Serial.print(F("#EVAL,")); Serial.print(INST_CH[i]); Serial.print(','); Serial.print(modeLabel);
+    Serial.print(F(",P=")); Serial.print(evalP[i]); Serial.print(F(",G=")); Serial.print(evalG[i]);
+    Serial.print(F(",B=")); Serial.print(evalB[i]); Serial.print(F(",M=")); Serial.print(miss);
+    Serial.print(F(",X=")); Serial.println(evalX[i]);
+  }
+  if (rxDrop) { Serial.print(F("#EVAL,rxDrop=")); Serial.println(rxDrop); }
+}
+
+void forwardLines()                    // 박자 출력이 밀리지 않게, USB 송신 버퍼에 여유가 있을 때만 한 줄씩
+{
+  while (rxTail != rxHead) {
+    uint8_t len = rxLen[rxTail];
+    if (Serial.availableForWrite() < len + 1 + 16) return;   // BEAT 줄 자리 16바이트는 남겨 둠
+    char line[RX_LEN + 1];
+    noInterrupts();
+    for (uint8_t i = 0; i <= len; i++) line[i] = rxBuf[rxTail][i];
+    interrupts();
+    rxTail = (rxTail + 1) % RX_LINES;
+    Serial.write((const uint8_t *)line, len);
+    Serial.write('\n');
+    if (state != IDLE || evalPending || line[0] == 'M') evalLine(line, len);   // 연주 중·끝난 직후 줄만 채점 (MODE는 언제든)
+  }
+}
 
 /* ===== 시작 / 멈춤 ===== */
 void startSong(uint16_t newBpm)
@@ -89,6 +189,7 @@ void startSong(uint16_t newBpm)
   t0Us = micros() + waitMs * 1000UL;
   stepIdx = 0;
   state = COUNTING;
+  evalReset();
   Serial.print(F("#start bpm="));
   Serial.println(bpm);
 }
@@ -99,6 +200,8 @@ void stopSong(bool byUser)
   digitalWrite(PIN_BEAT, LOW);
   pulseHigh = false;
   Serial.println(byUser ? F("END,STOP") : F("END"));
+  endedMs = millis();
+  evalPending = true;                  // 마지막 박 뒤 늦게 오는 줄(최대 반 박 + 전송)을 기다렸다가 출력
 }
 
 /* ===== 박 하나 처리 ===== */
@@ -177,7 +280,9 @@ void setup()
   pinMode(PIN_LED, OUTPUT);
   if (USE_START_BTN) pinMode(PIN_START_BTN, INPUT_PULLUP);
   Serial.begin(115200);
-  Serial.println(F("#conductor v0 ready: send START or START,<bpm>"));
+  Wire.begin(I2C_ADDR);                // 슬레이브. 내부 풀업도 켜지지만 외부 4.7kΩ(5V)을 꼭 다는 것을 권장
+  Wire.onReceive(onI2cReceive);
+  Serial.println(F("#conductor v1 ready (I2C 0x08): send START or START,<bpm>, or press D2"));
 }
 
 void loop()
@@ -205,5 +310,12 @@ void loop()
   if (ledOn && millis() - ledOnMs >= LED_MS) {
     digitalWrite(PIN_LED, LOW);
     ledOn = false;
+  }
+
+  forwardLines();                      // I2C로 받은 줄 → USB
+  if (evalPending && millis() - endedMs >= 1500) {   // END 뒤 1.5초 기다렸다가 채점 출력
+    evalPending = false;
+    forwardLines();
+    evalPrint();
   }
 }

@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <math.h>
 #include <stdio.h>
+#include "ensemble_link.h"   /* [합주] B1 DMA 전환·박자 펄스·게임 줄 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -158,6 +159,49 @@ static uint16_t adc_read_avg(uint8_t channel) {    // 8번 평균
   for (int k = 0; k < 8; k++) s += adc_read(channel);
   return (uint16_t)(s / 8);
 }
+
+/* ===== [합주] 광센서 4개를 DMA로 읽기 (DMA ON) / 위의 폴링 그대로 (DMA OFF) =====
+ * 두 모드 모두 "채널마다 최근 8번 평균"을 같은 메인 루프 주기로 쓴다. 다른 것은 누가 ADC 값을 옮기나 하나뿐.
+ * DMA ON : ADC1 scan(0→1→4→8) + 연속 변환, DMA1 채널1 circular로 adc_dma_buf에 계속 채움 (CPU는 평균만)
+ * DMA OFF: adc_read_avg() — CPU가 채널마다 SWSTART → EOC 기다림을 32번
+ * 소리(TIM3_CH1 PWM + DMA1 채널7)는 건드리지 않음. 채널1은 ADC1 전용이라 소리와 안 겹침 */
+#define SETS 8
+static volatile uint16_t adc_dma_buf[SETS * NCH];
+static const char *const harp_note[NCH] = {"DO", "RE", "MI", "SOL"};   /* ch[] 순서와 같게 */
+
+static void adc_dma_start(void) {
+  RCC->AHBENR |= RCC_AHBENR_DMA1EN;
+  DMA1_Channel1->CCR   = 0;
+  DMA1_Channel1->CPAR  = (uint32_t)&ADC1->DR;
+  DMA1_Channel1->CMAR  = (uint32_t)adc_dma_buf;
+  DMA1_Channel1->CNDTR = SETS * NCH;
+  DMA1_Channel1->CCR   = DMA_CCR_PL_0 | DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_0   /* 16비트 ↔ 16비트, 소리(PL_1)보다 낮은 우선순위 */
+                       | DMA_CCR_MINC | DMA_CCR_CIRC;
+  DMA1_Channel1->CCR  |= DMA_CCR_EN;
+  ADC1->SQR1 = (NCH - 1U) << ADC_SQR1_L_Pos;                                     /* 변환 4개 */
+  ADC1->SQR3 = ch[0] | (ch[1] << 5) | (ch[2] << 10) | ((uint32_t)ch[3] << 15);   /* 0 → 1 → 4 → 8 */
+  ADC1->CR1  = ADC_CR1_SCAN;
+  ADC1->CR2  = ADC_CR2_ADON | ADC_CR2_CONT | ADC_CR2_DMA | ADC_CR2_EXTTRIG | (7U << ADC_CR2_EXTSEL_Pos);
+  ADC1->CR2 |= ADC_CR2_SWSTART;
+}
+static void adc_dma_stop(void) {
+  ADC1->CR2 &= ~(ADC_CR2_CONT | ADC_CR2_DMA);     /* 지금 돌던 한 바퀴가 끝나면 멈춤 */
+  HAL_Delay(1);
+  DMA1_Channel1->CCR &= ~DMA_CCR_EN;
+  ADC1->CR1  = 0;                                   /* scan 끔 → adc_read()가 한 채널씩 */
+  ADC1->SQR1 = 0;
+  (void)ADC1->DR;                                   /* EOC 지움 */
+}
+void link_on_mode_change(uint8_t on) { if (on) adc_dma_start(); else adc_dma_stop(); }   /* B1 누를 때 모듈이 부름 */
+
+static uint16_t read_ch(int c) {                    /* 채널 c의 8번 평균 */
+  if (link_dma_on()) {
+    uint32_t s = 0;
+    for (int k = 0; k < SETS; k++) s += adc_dma_buf[k * NCH + c];
+    return (uint16_t)(s / SETS);
+  }
+  return adc_read_avg(ch[c]);
+}
 /* USER CODE END 0 */
 
 /**
@@ -194,6 +238,9 @@ int main(void)
   sound_test_init();
   audio_init();
   adc_init();
+  link_init();                                       /* [합주] USART2(HAL) 초기화 뒤 */
+  link_on_mode_change(link_dma_on());                /* [합주] 시작 모드(기본 DMA ON)로 센서 읽기 설정 */
+  HAL_Delay(5);                                      /* [합주] DMA 버퍼가 한 번 다 찰 때까지 (약 0.8ms) */
 
   for (int k = 0; k < 6; k++) { GPIOA->ODR ^= (1U << 5); HAL_Delay(150); }   // 시작 표시 3번
   GPIOA->ODR &= ~(1U << 5);
@@ -204,7 +251,7 @@ int main(void)
   uint16_t lit[NCH];
   uint32_t sum[NCH] = {0};
   for (int k = 0; k < 50; k++) {                   // 1초: 손 대지 말 것
-    for (int c = 0; c < NCH; c++) sum[c] += adc_read_avg(ch[c]);
+    for (int c = 0; c < NCH; c++) sum[c] += read_ch(c);
     HAL_Delay(20);
   }
   for (int c = 0; c < NCH; c++) lit[c] = (uint16_t)(sum[c] / 50);
@@ -219,11 +266,16 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	    link_loop();                                            // [합주] 줄 보내기, B1, #STAT
 	    uint8_t any = 0;
+	    uint16_t vv[NCH];
+	    link_busy_begin();                                      // [합주] CPU 사용률: 센서 읽기 시간만
+	    for (int c = 0; c < NCH; c++) vv[c] = read_ch(c);
+	    link_busy_end();
 	    for (int c = 0; c < NCH; c++) {
-	      uint16_t v = adc_read_avg(ch[c]);
+	      uint16_t v = vv[c];
 	      drop[c] = (int)lit[c] - (int)v;                       // 어두워진 만큼(+)
-	      if (!gate[c] && drop[c] > CUT_ON)  gate[c] = 1;
+	      if (!gate[c] && drop[c] > CUT_ON)  { gate[c] = 1; link_note_on(harp_note[c], 0); }   // [합주] 줄을 친 순간
 	      if (gate[c]  && drop[c] < CUT_OFF) gate[c] = 0;
 	      if (!gate[c] && track == 0) {                         // 안 가린 줄만 기준값이 천천히 따라감
 	        if (v > lit[c]) lit[c]++; else if (v < lit[c]) lit[c]--;
@@ -231,11 +283,11 @@ int main(void)
 	      any |= gate[c];
 	    }
 	    if (++track >= 20) track = 0;
-	    if (any) GPIOA->ODR |= (1U << 5); else GPIOA->ODR &= ~(1U << 5);   // LD2 = 하나라도 끊김
+	    (void)any;   // [합주] LD2는 DMA 모드 표시로 씀(켜짐 = DMA OFF). 원래: 하나라도 끊기면 LD2 켜짐
 
 	    if (HAL_GetTick() - last_print >= 100) {
 	      last_print = HAL_GetTick();
-	      int n = snprintf(msg, sizeof msg, "S2(A1)  now=%4d  lit=%4u  drop=%5d  cut=%u\r\n",
+	      int n = snprintf(msg, sizeof msg, "#S2(A1)  now=%4d  lit=%4u  drop=%5d  cut=%u\r\n",
 	                       (int)lit[1] - drop[1], lit[1], drop[1], gate[1]);
 	      HAL_UART_Transmit(&huart2, (uint8_t *)msg, n, 100);
 	    }
