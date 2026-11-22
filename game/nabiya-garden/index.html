@@ -7,6 +7,7 @@
   v1.0.2 — 배경 위 흰 막을 행별로 조절(CONFIG.bgVeil): 관악기·하프 0.22 그대로, 꽃밭인 드럼 행만 0.40 — 씨앗이 꽃밭에 묻히지 않게 (요청목록 2번)
   v1.0.3 — 픽셀 그림(나비·꽃·이슬·씨앗)을 '한 점 = 1px'로 줄여 두고 부드럽게 확대 없이 그림, 나비 크기 1.25→1.55배(CONFIG.butterflyScale) (요청목록 1·4번)
   v1.0.4 — 꽃에 행별 색을 입힐 때 밝은 꽃잎에만 입힘, 노란 꽃술과 남색 외곽선은 그대로 (요청목록 5번)
+  v1.0.5 — 노란 나비 한 장에서 날개 색만 바꿔 5색(도 산호빨강·레 주황·미 노랑·파 청록·솔 파랑), 남색 외곽선은 그대로 (요청목록 3번)
 -->
 <html lang="ko">
 <head>
@@ -63,7 +64,7 @@
    CONFIG — 실제 하드웨어로 해 본 뒤 바꿀 숫자는 여기만 고치면 된다
    ========================================================================== */
 const CONFIG = {
-  version: 'v1.0.4',
+  version: 'v1.0.5',
   // 판정 창(ms). 키보드 모드 판정과, 시리얼 줄에 등급 칸이 없을 때의 분류에 쓴다. 템포와 무관하게 ms 고정.
   judgeMs: { default: { P: 50, G: 120, B: 250 }, W: { P: 100, G: 200, B: 400 } },
   score: { P: 100, G: 70, B: 30, M: 0 },          // 음 틀림은 Bad 점수
@@ -606,7 +607,7 @@ function tinted(key, color) {                         // 흰 꽃 그림에 행�
   }
   return (TINT[id] = c);
 }
-const HUE = { DO: 0, RE: 25, MI: 50, FA: 160, SOL: 215 };
+const HUE = { DO: 6, RE: 28, MI: 43, FA: 165, SOL: 220 };   // 날개 색조(도) — 도 산호빨강, 레 주황, 미 노랑(기준 그림), 파 청록, 솔 파랑
 function butterflyImage(pitch) {                      // 색별 그림이 없고 한 장만 있으면 색조를 돌려 쓴다
   if (pitch === 'GREY') { if (IMG.butterfly_grey) return IMG.butterfly_grey; }
   else if (IMG['butterfly_' + pitch.toLowerCase()]) return pixelSprite('butterfly_' + pitch.toLowerCase());
@@ -615,8 +616,21 @@ function butterflyImage(pitch) {                      // 색별 그림이 없고
   const im = pixelSprite('butterfly_' + baseKey.toLowerCase());
   const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
   const x = c.getContext('2d');
-  x.filter = pitch === 'GREY' ? 'grayscale(1) opacity(.8)' : 'hue-rotate(' + (HUE[pitch] - HUE[baseKey]) + 'deg)';
+  if (pitch === 'GREY') { x.filter = 'grayscale(1) opacity(.8)'; x.drawImage(im, 0, 0); return (TINT[id] = c); }
   x.drawImage(im, 0, 0);
+  try {                                               // v1.0.5: 날개(밝고 색 있는 점)만 색조를 바꾸고 남색 외곽선·흰 반짝임은 그대로
+    const d = x.getImageData(0, 0, c.width, c.height), shift = HUE[pitch] - HUE[baseKey];
+    for (let i = 0; i < d.data.length; i += 4) {
+      if (d.data[i + 3] < 8) continue;
+      const [h, sat, l] = rgbHsl(d.data[i], d.data[i + 1], d.data[i + 2]);
+      if (l < 0.3 || sat < 0.3) continue;
+      const rgb = hslRgb((h + shift + 360) % 360, sat, l);
+      d.data[i] = rgb[0]; d.data[i + 1] = rgb[1]; d.data[i + 2] = rgb[2];
+    }
+    x.putImageData(d, 0, 0);
+  } catch (e) {                                       // 픽셀을 못 읽으면 예전 방식(전체 색조 돌리기)
+    x.clearRect(0, 0, c.width, c.height); x.filter = 'hue-rotate(' + (HUE[pitch] - HUE[baseKey]) + 'deg)'; x.drawImage(im, 0, 0);
+  }
   return (TINT[id] = c);
 }
 
